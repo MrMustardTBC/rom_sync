@@ -1,7 +1,7 @@
 #!/bin/bash
 
 set -euo pipefail # Exit on error, unset variables, and pipe failures
-IFS=$'\n\t' 
+IFS=$' \n\t' 
 
 log_file="${0}.log" # Log to a file named after the script
 
@@ -515,28 +515,34 @@ main() {
   # --- End of file calculation ---
   # --- rsync systems ---
   log_message "Syncing systems..."
-  # Using --inplace for local USB/microSD drives can significantly speed up transfers
-  # by directly modifying existing files.
-  rsync_command="rsync $GLOBAL_RSYNC_OPTIONS"
+  # ... (other code) ...
 
-  # Add --delete flag if purge_target is true. This will delete files from target not in source.
+  # Explicitly convert GLOBAL_RSYNC_OPTIONS string into an array of options
+  # using read -r -a for robust splitting.
+  local rsync_options_array=()
+  read -r -a rsync_options_array <<< "$GLOBAL_RSYNC_OPTIONS"
+
+  # Initialize rsync arguments as an array: first element is 'rsync',
+  # followed by the now-correctly-split global options.
+  rsync_args=("${rsync_options_array[@]}")
+
+  # Add --delete flag if purge_target is true
   if "$purge_target"; then
-    rsync_command+=" --delete"
+    rsync_args+=(--delete)
     log_message "Purge mode enabled: rsync will delete extraneous files from target."
-  fi
-
-  # for testing, rsync will not actually copy files
-  if "$dry_run_mode"; then
-    rsync_command+=" --dry-run"
   fi
 
   # Build the rsync command with individual source system paths
   for system in "${targeted_systems[@]}"; do
       # If a system is targeted, we need to ensure its original name is passed to rsync
       # as the target directories have been "unrenamed" by now.
-      rsync_command+=" \"${GLOBAL_SOURCE_BASE}/${system}\""
+      # No need for \" or \\\" here, the array element handles spaces.
+      rsync_args+=("${GLOBAL_SOURCE_BASE}/${system}")
   done
-  rsync_command+=" \"${target_dir}/\""
+
+  # Add target directory - ensure trailing slash for directory content sync
+  # No need for \" or \\\" here.
+  rsync_args+=("${target_dir}/")
 
   # Dynamically add excludes: always exclude if not explicitly targeted.
   # This prevents accidentally syncing excluded directories if they exist in GLOBAL_SOURCE_BASE
@@ -550,17 +556,26 @@ main() {
       fi
     done
     if "$should_exclude"; then
-      rsync_command+=" --exclude=\"$dir/\"" # Add trailing slash to exclude directory content
+      # No need for \" or \\\" here, the array element handles spaces.
+      rsync_args+=("--exclude=${dir}/") # Add trailing slash to exclude directory content
     fi
   done
 
-  log_message "Running rsync: $rsync_command"
-  eval "$rsync_command" 2>> "$log_file" || {
-    rsync_err=$(tail -n 5 "$log_file")
-    log_message "Error: rsync operation failed. Details: $rsync_err" >&2
-    echo "rsync error: $rsync_err" >&2
-    exit 1
-  }
+  # --- Execution ---
+  # Log the command before running (for debugging, expand the array elements)
+  log_message "Running rsync: ${rsync_args[*]}"
+# DEBUG LINE: Print the exact command rsync will receive
+printf 'rsync command: %q ' "${rsync_args[@]}"; echo
+  # Execute the rsync command using the array.
+  # "${rsync_args[@]}" expands each element of the array into a separate argument,
+  # correctly handling spaces and special characters.
+  rsync "${rsync_args[@]}" 2>> "$log_file" || {
+    rsync_exit_status=$? # Capture the exit status
+    rsync_err=$(tail -n 5 "$log_file") # Get last 5 lines of error
+    log_message "Error: rsync operation failed with exit code $rsync_exit_status. Details: $rsync_err" >&2
+    echo "rsync error: $rsync_err" >&2 # Also print to console
+    exit "$rsync_exit_status" # Exit with the rsync error code
+}
 
   # --- Post-sync operations ---
   rename_target_directories

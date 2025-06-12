@@ -1,7 +1,7 @@
 #!/bin/bash
 
 set -euo pipefail # Exit on error, unset variables, and pipe failures
-IFS=$'\n\t' 
+IFS=$' \n\t' 
 
 log_file="${0}.log" # Log to a file named after the script
 
