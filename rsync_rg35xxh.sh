@@ -417,14 +417,14 @@ main() {
     # Removed 'local' from system_name and is_excluded declarations within this while loop.
     while IFS= read -r -d $'\0' full_path; do
       # Extract just the basename of the directory
-      system_name=$(basename "$full_path") # NO LOCAL HERE
+      local system_name=$(basename "$full_path") 
 
       # Skip if system_name is empty or just '.'
       if [ -z "$system_name" ] || [ "$system_name" = "." ]; then
         continue
       fi
 
-      is_excluded=false # NO LOCAL HERE
+      local is_excluded=false
       for exclude_dir in "${exclude_dirs[@]}"; do
         if [ "$system_name" = "$exclude_dir" ]; then
           is_excluded=true
@@ -564,8 +564,7 @@ main() {
   # --- Execution ---
   # Log the command before running (for debugging, expand the array elements)
   log_message "Running rsync: ${rsync_args[*]}"
-# DEBUG LINE: Print the exact command rsync will receive
-printf 'rsync command: %q ' "${rsync_args[@]}"; echo
+
   # Execute the rsync command using the array.
   # "${rsync_args[@]}" expands each element of the array into a separate argument,
   # correctly handling spaces and special characters.
