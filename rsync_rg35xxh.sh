@@ -52,6 +52,25 @@ log_message() {
   echo "$timestamp - $message" >> "$log_file"
 }
 
+show_help() {
+  echo "Usage: $(basename "$0") [options] [SYSTEM_NAME1 SYSTEM_NAME2 ...]"
+  echo ""
+  echo "Synchronizes ROMs from a source directory to a target device."
+  echo "If no SYSTEM_NAMEs are provided, performs a full sync of all non-excluded systems."
+  echo ""
+  echo "Options:"
+  echo "  -h, --help           Show this help message and exit."
+  echo "  -s, --silent         Run in silent mode (no console output, only logs)."
+  echo "  -n, --dry-run        Perform a dry run (simulate rsync, still merges gamelist.xml fields into source)."
+  echo "  --skip-gamelist-sync Skip gamelist.xml metadata synchronization (favorites, preserved fields)."
+  echo "  --purge              Enable purge mode: rsync will delete extraneous files from target that are not in source."
+  echo ""
+  echo "Configuration is loaded from:"
+  echo "  - ./common_config.sh (global settings)"
+  echo "  - ${0%.sh}_config.sh (script-specific settings, e.g., rsync_rg35xxh_config.sh)"
+  echo "Please ensure these files exist and are configured correctly."
+}
+
 check_dir_exists() {
   local dir="$1"
   if [ ! -d "$dir" ]; then
@@ -359,180 +378,197 @@ export -f log_message check_dir_exists check_free_space merge_preserved_fields m
 # Variables used by the exported functions need to be exported.
 export GLOBAL_SOURCE_BASE target_dir log_file silent_mode fields_to_preserve exclude_dirs rename_folders reverse_rename_folders # Export rename arrays as well
 
-# --- Check for silent mode and process arguments ---
-declare -a targeted_systems=() # Initialize array globally, no 'local' here.
-for arg in "$@"; do
-  case "$arg" in
-    -s|--silent)
-      silent_mode=true
-      ;;
-    --skip-gamelist-sync)
-      skip_gamelist_sync=true
-      ;;
-    --purge) # New flag for purging
-      purge_target=true
-      ;;
-    *)
-      targeted_systems+=("$arg")
-      ;;
-  esac
-done
+main() {
+  # --- Check for silent mode and process arguments ---
+  declare -a targeted_systems=() # Initialize array globally, no 'local' here.
+  for arg in "$@"; do
+    case "$arg" in
+      -h|--help) 
+        show_help
+        exit 0 # Exit after showing help
+        ;;
+      -s|--silent)
+        silent_mode=true
+        ;;
+      --skip-gamelist-sync)
+        skip_gamelist_sync=true
+        ;;
+      -n|--dry-run) 
+        dry_run_mode=true
+        log_message "Dry run mode enabled: rsync will not make changes."
+        ;;
+      --purge) 
+        purge_target=true
+        ;;
+      *)
+        targeted_systems+=("$arg")
+        ;;
+    esac
+  done
 
-# --- Check for targeted update arguments ---
-if [ ${#targeted_systems[@]} -gt 0 ]; then
-  log_message "Targeted update for: ${targeted_systems[@]}"
-else
-  log_message "Full sync from: ${GLOBAL_SOURCE_BASE}"
-  # When doing a full sync, we need to populate targeted_systems with all
-  # source directories that are not excluded, so the rename logic works.
-  # Use a loop with read -r -d $'\0' to process null-separated output robustly.
-  # Removed 'local' from system_name and is_excluded declarations within this while loop.
-  while IFS= read -r -d $'\0' full_path; do
-    # Extract just the basename of the directory
-    system_name=$(basename "$full_path") # NO LOCAL HERE
+  # --- Check for targeted update arguments ---
+  if [ ${#targeted_systems[@]} -gt 0 ]; then
+    log_message "Targeted update for: ${targeted_systems[@]}"
+  else
+    log_message "Full sync from: ${GLOBAL_SOURCE_BASE}"
+    # When doing a full sync, we need to populate targeted_systems with all
+    # source directories that are not excluded, so the rename logic works.
+    # Use a loop with read -r -d $'\0' to process null-separated output robustly.
+    # Removed 'local' from system_name and is_excluded declarations within this while loop.
+    while IFS= read -r -d $'\0' full_path; do
+      # Extract just the basename of the directory
+      system_name=$(basename "$full_path") # NO LOCAL HERE
 
-    # Skip if system_name is empty or just '.'
-    if [ -z "$system_name" ] || [ "$system_name" = "." ]; then
-      continue
+      # Skip if system_name is empty or just '.'
+      if [ -z "$system_name" ] || [ "$system_name" = "." ]; then
+        continue
+      fi
+
+      is_excluded=false # NO LOCAL HERE
+      for exclude_dir in "${exclude_dirs[@]}"; do
+        if [ "$system_name" = "$exclude_dir" ]; then
+          is_excluded=true
+          break
+        fi
+      done
+      if ! "$is_excluded" && [[ -d "${GLOBAL_SOURCE_BASE}/${system_name}" ]]; then
+        targeted_systems+=("$system_name")
+        log_message "  - Found system for full sync: $system_name"
+      fi
+    done < <(find "${GLOBAL_SOURCE_BASE}" -maxdepth 1 -mindepth 1 -type d -print0)
+  fi
+
+  log_message "Targeted systems for this run: ${targeted_systems[@]}"
+
+  # --- Check if source and target base directories exist ---
+  log_message "Checking for source directory: $GLOBAL_SOURCE_BASE"
+  check_dir_exists "$GLOBAL_SOURCE_BASE"
+  log_message "Checking for target directory: $target_dir"
+  check_dir_exists "$target_dir"
+
+  # --- Pre-sync operations ---
+  unrename_target_directories
+  # Add a single sync here after all renames are done, if any.
+  if [ ${#rename_folders[@]} -gt 0 ]; then # Only sync if there are actual renames configured
+    log_message "Executing sync after pre-rsync directory renames."
+    sync
+  fi
+
+  # --- Check free space on target ---
+  check_free_space "$target_dir" "$min_free_space_gb"
+
+  # --- Conditional Gamelist Sync (Parallelized) ---
+  if ! "$skip_gamelist_sync"; then
+    log_message "Starting parallel gamelist.xml metadata synchronization for ${#targeted_systems[@]} systems."
+    
+    # Pipe the targeted systems to xargs for parallel execution
+    # -P $(nproc --all) will use as many parallel processes as CPU cores. Adjust if needed.
+    # -I {} replaces {} with each argument (system name)
+    # The bash -c command now properly finds exported functions and variables.
+    printf '%s\n' "${targeted_systems[@]}" | xargs -P "$(nproc --all)" -I {} bash -c 'process_gamelist_for_system "{}"'
+
+    # Consolidate sync here after all parallel gamelist operations are done.
+    if [ ${#targeted_systems[@]} -gt 0 ]; then # Only sync if some systems were processed
+      log_message "Executing sync after all gamelist operations."
+      sync
     fi
+  else
+    log_message "Skipping gamelist.xml metadata synchronization as --skip-gamelist-sync flag is present."
+  fi
 
-    is_excluded=false # NO LOCAL HERE
-    for exclude_dir in "${exclude_dirs[@]}"; do
-      if [ "$system_name" = "$exclude_dir" ]; then
-        is_excluded=true
+  # --- Calculate number of files to copy ---
+  log_message "Calculating number of files and directories in the logical romset..."
+  total_items_to_copy=0
+
+  for system in "${targeted_systems[@]}"; do
+      local source_path="${GLOBAL_SOURCE_BASE}/${system}"
+      
+      # Start a find command for each targeted system
+      find_command="find \"$source_path\" -mindepth 1"
+
+      # Add excludes for directories that should not be part of this system's sync
+      for exclude_dir_name in "${exclude_dirs[@]}"; do
+          # Only exclude if this system's path is not the exclude_dir itself
+          # and the exclude_dir is not one of the targeted systems.
+          # This prevents excluding the very system we are trying to count.
+          local is_targeted_exclude=false
+          for targeted_sys in "${targeted_systems[@]}"; do
+              if [ "$exclude_dir_name" = "$targeted_sys" ]; then
+                  is_targeted_exclude=true
+                  break
+              fi
+          done
+
+          if [ "$exclude_dir_name" != "$system" ] && ! "$is_targeted_exclude"; then
+              find_command+=" -not -path \"$source_path/$exclude_dir_name/*\" -not -path \"$source_path/$exclude_dir_name\""
+          fi
+      done
+      
+      # Execute the find command and count lines (each line is an item)
+      # Exclude the root system directory itself to count its contents
+      current_system_items=$(eval "$find_command" 2>/dev/null | wc -l)
+      total_items_to_copy=$((total_items_to_copy + current_system_items))
+      log_message "  - System '$system': $current_system_items items."
+  done
+
+  log_message "Total items (files and directories) in logical romset to copy: $total_items_to_copy"
+  # --- End of file calculation ---
+  # --- rsync systems ---
+  log_message "Syncing systems..."
+  # Using --inplace for local USB/microSD drives can significantly speed up transfers
+  # by directly modifying existing files.
+  rsync_command="rsync $GLOBAL_RSYNC_OPTIONS"
+
+  # Add --delete flag if purge_target is true. This will delete files from target not in source.
+  if "$purge_target"; then
+    rsync_command+=" --delete"
+    log_message "Purge mode enabled: rsync will delete extraneous files from target."
+  fi
+
+  # for testing, rsync will not actually copy files
+  if "$dry_run_mode"; then
+    rsync_command+=" --dry-run"
+  fi
+
+  # Build the rsync command with individual source system paths
+  for system in "${targeted_systems[@]}"; do
+      # If a system is targeted, we need to ensure its original name is passed to rsync
+      # as the target directories have been "unrenamed" by now.
+      rsync_command+=" \"${GLOBAL_SOURCE_BASE}/${system}\""
+  done
+  rsync_command+=" \"${target_dir}/\""
+
+  # Dynamically add excludes: always exclude if not explicitly targeted.
+  # This prevents accidentally syncing excluded directories if they exist in GLOBAL_SOURCE_BASE
+  # but are not part of the targeted systems.
+  for dir in "${exclude_dirs[@]}"; do
+    should_exclude=true
+    for targeted_sys in "${targeted_systems[@]}"; do
+      if [ "$dir" = "$targeted_sys" ]; then
+        should_exclude=false
         break
       fi
     done
-    if ! "$is_excluded" && [[ -d "${GLOBAL_SOURCE_BASE}/${system_name}" ]]; then
-      targeted_systems+=("$system_name")
-      log_message "  - Found system for full sync: $system_name"
-    fi
-  done < <(find "${GLOBAL_SOURCE_BASE}" -maxdepth 1 -mindepth 1 -type d -print0)
-fi
-
-log_message "Targeted systems for this run: ${targeted_systems[@]}"
-
-# --- Check if source and target base directories exist ---
-log_message "Checking for source directory: $GLOBAL_SOURCE_BASE"
-check_dir_exists "$GLOBAL_SOURCE_BASE"
-log_message "Checking for target directory: $target_dir"
-check_dir_exists "$target_dir"
-
-# --- Pre-sync operations ---
-unrename_target_directories
-# Add a single sync here after all renames are done, if any.
-if [ ${#rename_folders[@]} -gt 0 ]; then # Only sync if there are actual renames configured
-  log_message "Executing sync after pre-rsync directory renames."
-  sync
-fi
-
-# --- Check free space on target ---
-check_free_space "$target_dir" "$min_free_space_gb"
-
-# --- Conditional Gamelist Sync (Parallelized) ---
-if ! "$skip_gamelist_sync"; then
-  log_message "Starting parallel gamelist.xml metadata synchronization for ${#targeted_systems[@]} systems."
-  
-  # Pipe the targeted systems to xargs for parallel execution
-  # -P $(nproc --all) will use as many parallel processes as CPU cores. Adjust if needed.
-  # -I {} replaces {} with each argument (system name)
-  # The bash -c command now properly finds exported functions and variables.
-  printf '%s\n' "${targeted_systems[@]}" | xargs -P "$(nproc --all)" -I {} bash -c 'process_gamelist_for_system "{}"'
-
-  # Consolidate sync here after all parallel gamelist operations are done.
-  if [ ${#targeted_systems[@]} -gt 0 ]; then # Only sync if some systems were processed
-    log_message "Executing sync after all gamelist operations."
-    sync
-  fi
-else
-  log_message "Skipping gamelist.xml metadata synchronization as --skip-gamelist-sync flag is present."
-fi
-
-# --- Calculate number of files to copy ---
-log_message "Calculating number of files and directories in the logical romset..."
-total_items_to_copy=0
-
-for system in "${targeted_systems[@]}"; do
-    local source_path="${GLOBAL_SOURCE_BASE}/${system}"
-    
-    # Start a find command for each targeted system
-    find_command="find \"$source_path\" -mindepth 1"
-
-    # Add excludes for directories that should not be part of this system's sync
-    for exclude_dir_name in "${exclude_dirs[@]}"; do
-        # Only exclude if this system's path is not the exclude_dir itself
-        # and the exclude_dir is not one of the targeted systems.
-        # This prevents excluding the very system we are trying to count.
-        local is_targeted_exclude=false
-        for targeted_sys in "${targeted_systems[@]}"; do
-            if [ "$exclude_dir_name" = "$targeted_sys" ]; then
-                is_targeted_exclude=true
-                break
-            fi
-        done
-
-        if [ "$exclude_dir_name" != "$system" ] && ! "$is_targeted_exclude"; then
-            find_command+=" -not -path \"$source_path/$exclude_dir_name/*\" -not -path \"$source_path/$exclude_dir_name\""
-        fi
-    done
-    
-    # Execute the find command and count lines (each line is an item)
-    # Exclude the root system directory itself to count its contents
-    current_system_items=$(eval "$find_command" 2>/dev/null | wc -l)
-    total_items_to_copy=$((total_items_to_copy + current_system_items))
-    log_message "  - System '$system': $current_system_items items."
-done
-
-log_message "Total items (files and directories) in logical romset to copy: $total_items_to_copy"
-# --- End of file calculation ---
-# --- rsync systems ---
-log_message "Syncing systems..."
-# Using --inplace for local USB/microSD drives can significantly speed up transfers
-# by directly modifying existing files.
-rsync_command="rsync $GLOBAL_RSYNC_OPTIONS"
-
-# Add --delete flag if purge_target is true. This will delete files from target not in source.
-if "$purge_target"; then
-  rsync_command+=" --delete"
-  log_message "Purge mode enabled: rsync will delete extraneous files from target."
-fi
-
-# Build the rsync command with individual source system paths
-for system in "${targeted_systems[@]}"; do
-    # If a system is targeted, we need to ensure its original name is passed to rsync
-    # as the target directories have been "unrenamed" by now.
-    rsync_command+=" \"${GLOBAL_SOURCE_BASE}/${system}\""
-done
-rsync_command+=" \"${target_dir}/\""
-
-# Dynamically add excludes: always exclude if not explicitly targeted.
-# This prevents accidentally syncing excluded directories if they exist in GLOBAL_SOURCE_BASE
-# but are not part of the targeted systems.
-for dir in "${exclude_dirs[@]}"; do
-  should_exclude=true
-  for targeted_sys in "${targeted_systems[@]}"; do
-    if [ "$dir" = "$targeted_sys" ]; then
-      should_exclude=false
-      break
+    if "$should_exclude"; then
+      rsync_command+=" --exclude=\"$dir/\"" # Add trailing slash to exclude directory content
     fi
   done
-  if "$should_exclude"; then
-    rsync_command+=" --exclude=\"$dir/\"" # Add trailing slash to exclude directory content
-  fi
-done
 
-log_message "Running rsync: $rsync_command"
-eval "$rsync_command" 2>> "$log_file" || {
-  rsync_err=$(tail -n 5 "$log_file")
-  log_message "Error: rsync operation failed. Details: $rsync_err" >&2
-  echo "rsync error: $rsync_err" >&2
-  exit 1
+  log_message "Running rsync: $rsync_command"
+  eval "$rsync_command" 2>> "$log_file" || {
+    rsync_err=$(tail -n 5 "$log_file")
+    log_message "Error: rsync operation failed. Details: $rsync_err" >&2
+    echo "rsync error: $rsync_err" >&2
+    exit 1
+  }
+
+  # --- Post-sync operations ---
+  rename_target_directories
+
+  # Final sync to ensure all writes are flushed
+  log_message "RG35xx H sync and modifications complete."
+  log_message "Executing final sync command to flush write buffers."
+  sync
 }
 
-# --- Post-sync operations ---
-rename_target_directories
-
-# Final sync to ensure all writes are flushed
-log_message "RG35xx H sync and modifications complete."
-log_message "Executing final sync command to flush write buffers."
-sync
+main "$@"
