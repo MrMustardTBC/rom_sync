@@ -1,5 +1,8 @@
 #!/bin/bash
 
+set -euo pipefail # Exit on error, unset variables, and pipe failures
+IFS=$'\n\t' 
+
 # Source common parameters
 if [ -f "./common_config.sh" ]; then
   source "./common_config.sh"
