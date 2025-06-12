@@ -4,3 +4,6 @@ common_config.sh
 
 # log files
 *.log
+
+# editor backup files
+*~
