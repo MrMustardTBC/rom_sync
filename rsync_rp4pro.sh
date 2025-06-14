@@ -360,6 +360,67 @@ rename_target_directories() {
   done
 }
 
+# Function to reverse move media folders (pre-rsync) ---
+reverse_move_media_folders() {
+  local system_name="$1"
+  local target_system_dir="${target_dir}/${system_name}"
+  local media_source_dir="${media_target_base}/${system_name}"
+
+  log_message "  - Reversing media folder moves for $system_name (pre-rsync)..."
+
+  # We iterate through media_folders, but check for both original and renamed 'Imgs' in source
+  for folder in "${media_folders[@]}"; do
+    local source_folder="${media_source_dir}/${folder}"
+    local dest_folder="${target_system_dir}/${folder}"
+    
+    # Special handling for 'Imgs' if it was renamed to 'miximages'
+    if [ "$folder" == "Imgs" ]; then
+      source_folder="${media_source_dir}/${miximages_name}"
+    fi
+
+    if [ -d "$source_folder" ]; then
+      log_message "    - Moving '$source_folder' back to '$dest_folder'"
+      mkdir -p "$(dirname "$dest_folder")" # Ensure parent dir exists before mv
+      mv "$source_folder" "$dest_folder" || log_message "    - Warning: Failed to move '$source_folder'."
+    else
+      log_message "    - Source media folder '$source_folder' not found, skipping reverse move."
+    fi
+  done
+}
+
+# Function to move media folders (post-rsync) ---
+move_media_folders() {
+  local system_name="$1"
+  local target_system_dir="${target_dir}/${system_name}"
+  local media_dest_dir="${media_target_base}/${system_name}"
+
+  log_message "  - Moving media folders for $system_name (post-rsync)..."
+  log_message "    - Target system directory: $target_system_dir"
+  log_message "    - Media destination directory: $media_dest_dir"
+  mkdir -p "$media_dest_dir" || log_message "    - Warning: Failed to create '$media_dest_dir'."
+
+  for folder in "${media_folders[@]}"; do
+    local source_folder="${target_system_dir}/${folder}"
+    local dest_folder="${media_dest_dir}/${folder}"
+
+    log_message "    - Processing folder: $folder"
+    log_message "      - Source folder: $source_folder"
+
+    if [ -d "$source_folder" ]; then
+      if [ "$folder" == "Imgs" ]; then
+        dest_folder="${media_dest_dir}/${miximages_name}"
+        log_message "      - Moving and renaming '$source_folder' to '$dest_folder'"
+        mv "$source_folder" "$dest_folder" || log_message "      - Warning: Failed to move and rename '$source_folder'."
+      else
+        log_message "      - Moving '$source_folder' to '$dest_folder'"
+        mv "$source_folder" "$dest_folder" || log_message "      - Warning: Failed to move '$source_folder'."
+      fi
+    else
+      log_message "      - Source folder '$source_folder' does not exist, skipping move."
+    fi
+  done
+}
+
 # --- Wrapper function for parallel gamelist processing ---
 # This function is executed in a subshell by xargs.
 # It needs access to other functions and global variables.
@@ -375,8 +436,10 @@ process_gamelist_for_system() {
 # --- Export all necessary functions and variables for subshells ---
 # Functions called by process_gamelist_for_system need to be exported.
 export -f log_message check_dir_exists check_free_space merge_preserved_fields merge_favorites process_gamelist_for_system
+export -f unrename_target_directories rename_target_directories reverse_move_media_folders move_media_folders # Export new functions
 # Variables used by the exported functions need to be exported.
 export GLOBAL_SOURCE_BASE target_dir log_file silent_mode fields_to_preserve exclude_dirs rename_folders reverse_rename_folders # Export rename arrays as well
+export tools_dir media_target_base media_folders miximages_name # Export new media variables
 
 main() {
   # --- Check for silent mode and process arguments ---
@@ -445,6 +508,15 @@ main() {
   check_dir_exists "$GLOBAL_SOURCE_BASE"
   log_message "Checking for target directory: $target_dir"
   check_dir_exists "$target_dir"
+  log_message "Checking for tools directory: $tools_dir"
+  check_dir_exists "$tools_dir"
+  log_message "Checking for media target base directory: $media_target_base"
+  mkdir -p "$media_target_base"  # Create if it doesn't exist (and check result)
+  if [ ! -d "$media_target_base" ]; then
+      log_message "Error: Failed to create or find media target base directory: $media_target_base" >&2
+      exit 1
+  fi
+
 
   # --- Pre-sync operations ---
   unrename_target_directories
@@ -453,6 +525,14 @@ main() {
     log_message "Executing sync after pre-rsync directory renames."
     sync
   fi
+
+  log_message "Reversing media folder moves (before rsync)..."
+  for system in "${targeted_systems[@]}"; do
+    reverse_move_media_folders "$system"
+  done
+  log_message "Executing sync after reverse media moves."
+  sync
+
 
   # --- Check free space on target ---
   check_free_space "$target_dir" "$min_free_space_gb"
@@ -578,6 +658,11 @@ main() {
 
   # --- Post-sync operations ---
   rename_target_directories
+
+  log_message "Moving media folders (after rsync)..."
+  for system in "${targeted_systems[@]}"; do
+    move_media_folders "$system"
+  done
 
   # Final sync to ensure all writes are flushed
   log_message "Retroid Pocket 4 Pro sync and modifications complete."
