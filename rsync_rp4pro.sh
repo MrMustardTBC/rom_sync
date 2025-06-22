@@ -131,7 +131,6 @@ check_free_space() {
 # --- Optimized Function to merge preserved fields from target to source ---
 merge_preserved_fields() {
   local system_name="$1"
-  # IMPORTANT: gamelist_target is expected to be in the roms folder for merging
   local source_rom_dir="${GLOBAL_SOURCE_BASE}/${system_name}"
   local target_rom_dir="${target_dir}/${system_name}"
   local gamelist_source="${source_rom_dir}/gamelist.xml"
@@ -161,13 +160,31 @@ merge_preserved_fields() {
     return 1
   }
 
+  declare -A source_crc32_map  # path -> crc32
+  declare -A source_cheevosId_map # path -> cheevosId
+  declare -A source_cheevosHash_map # path -> cheevosHash
+  declare -A source_game_paths # Stores all paths found in source, for existence check
+
+  # NEW OPTIMIZATION: Read all relevant fields from SOURCE gamelist once into associative arrays
+  # We only care about games with a path (for lookup) and a non-empty ID (as per original logic).
+  local source_all_fields_data=$(xmlstarlet sel -t -m "/gameList/game[path and (@id and @id!='0' and @id!='')]" \
+    -v "concat(path,'|',crc32,'|',cheevosId,'|',cheevosHash)" -n "$gamelist_source_temp" 2>/dev/null)
+
+  while IFS='|' read -r s_path s_crc32 s_cheevosId s_cheevosHash; do
+    if [ -n "$s_path" ]; then
+      source_game_paths["$s_path"]=true # Mark path as existing in source
+      source_crc32_map["$s_path"]="$s_crc32"
+      source_cheevosId_map["$s_path"]="$s_cheevosId"
+      source_cheevosHash_map["$s_path"]="$s_cheevosHash"
+    fi
+  done <<< "$source_all_fields_data"
+
   local fields_updated=0
   declare -a xmlstarlet_args=() # Use an array for arguments
 
-  # Read target gamelist and build xmlstarlet commands
-  # The following command extracts id, path, and then the values for fields_to_preserve for each game.
-  target_games_data=$(xmlstarlet sel -t -m "/gameList/game[@id and @id!='0' and @id!='']" \
-    -v "concat(@id,'|',path,'|',crc32,'|',cheevosId,'|',cheevosHash)" -n "$gamelist_target" 2>/dev/null)
+  # Extract paths and values from TARGET gamelist
+  target_games_data=$(xmlstarlet sel -t -m "/gameList/game[path and (@id and @id!='0' and @id!='')]" \
+    -v "concat(path,'|',crc32,'|',cheevosId,'|',cheevosHash)" -n "$gamelist_target" 2>/dev/null)
 
   # Check if target_games_data is empty, indicating no relevant games or fields
   if [ -z "$target_games_data" ]; then
@@ -177,46 +194,47 @@ merge_preserved_fields() {
   fi
 
   while IFS='|' read -r game_id game_path crc32_val cheevosId_val cheevosHash_val; do
-    # Skip if game_path is empty; we are now primarily matching by path
+    # Skip if game_path is empty
     if [ -z "$game_path" ]; then
       log_message "    - Game entry (ID $game_id) has no path, skipping merge for this entry."
       continue
     fi
     
-    # Try finding by path first, as it's more reliable for ROM files
-    # Using normalize-space() for robustness against leading/trailing whitespace in paths
-    local escaped_game_path=$(escape_for_xpath "$game_path")
-    local game_exists=$(xmlstarlet sel -t -v "count(/gameList/game[normalize-space(path) = normalize-space($escaped_game_path)])" "$gamelist_source_temp" 2>/dev/null)
-    
-    if [ "$game_exists" -gt 0 ]; then
-      log_message "  - Processing game (path match): $game_path"
-      # Build the xmlstarlet command string for this game, targeting by path
-      for field in "${fields_to_preserve[@]}"; do
-        local field_value
-        case "$field" in
-          "crc32") field_value="$crc32_val";;
-          "cheevosId") field_value="$cheevosId_val";;
-          "cheevosHash") field_value="$cheevosHash_val";;
-          *) continue;; # Should not happen
-        esac
+    # NEW OPTIMIZATION: Check if game exists in source using in-memory map
+    if [[ "${source_game_paths[$game_path]:-}" != "true" ]]; then
+      log_message "    - Game path '$game_path' (ID $game_id) not found in source gamelist. Skipping field merge."
+      continue
+    fi
 
-        if [ -n "$field_value" ]; then
-          # Check if the field exists for this game in the source (by path)
-          local field_exists=$(xmlstarlet sel -t -v "count(/gameList/game[normalize-space(path) = normalize-space($escaped_game_path)]/$field)" "$gamelist_source_temp" 2>/dev/null)
-          
-          if [ "$field_exists" -gt 0 ]; then
-            xmlstarlet_args+=("-u" "/gameList/game[normalize-space(path) = normalize-space($escaped_game_path)]/$field" -v "$field_value")
-            log_message "    - Scheduled update for $field for game path $game_path"
-          else
-            xmlstarlet_args+=("-s" "/gameList/game[normalize-space(path) = normalize-space($escaped_game_path)]" "-t" "elem" "-n" "$field" "-v" "$field_value")
+    log_message "  - Processing game (path match): $game_path"
+    local escaped_game_path=$(escape_for_xpath "$game_path")
+    local game_xpath="/gameList/game[normalize-space(path) = normalize-space($escaped_game_path)]"
+    
+    for field in "${fields_to_preserve[@]}"; do
+      local target_value
+      local source_value # This will hold the value from our in-memory map
+
+      case "$field" in
+        "crc32") target_value="$crc32_val"; source_value="${source_crc32_map[$game_path]}";;
+        "cheevosId") target_value="$cheevosId_val"; source_value="${source_cheevosId_map[$game_path]}";;
+        "cheevosHash") target_value="$cheevosHash_val"; source_value="${source_cheevosHash_map[$game_path]}";;
+        *) continue;; # Should not happen, but defensive
+      esac
+
+      if [ -n "$target_value" ]; then
+        # Compare with values from in-memory source maps
+        if [[ "$source_value" != "$target_value" ]]; then
+          if [[ -n "$source_value" ]]; then # Field exists in source but value is different
+            xmlstarlet_args+=("-u" "$game_xpath/$field" -v "$target_value")
+            log_message "    - Scheduled update for $field for game path $game_path (was '$source_value', now '$target_value')"
+          else # Field does not exist in source
+            xmlstarlet_args+=("-s" "$game_xpath" "-t" "elem" "-n" "$field" -v "$target_value")
             log_message "    - Scheduled add for $field for game path $game_path"
           fi
           fields_updated=$((fields_updated + 1))
         fi
-      done
-    else
-      log_message "    - Game path '$game_path' (ID $game_id) not found in source gamelist. Skipping field merge."
-    fi
+      fi
+    done
   done <<< "$target_games_data"
 
   if [ $fields_updated -gt 0 ]; then
@@ -241,7 +259,6 @@ merge_preserved_fields() {
 # --- Optimized Function to merge favorites ---
 merge_favorites() {
   local system_name="$1"
-  # IMPORTANT: gamelist_target_existing is expected to be in the roms folder for merging
   local source_rom_dir="${GLOBAL_SOURCE_BASE}/${system_name}"
   local target_rom_dir="${target_dir}/${system_name}"
   local gamelist_source="${source_rom_dir}/gamelist.xml"
@@ -265,10 +282,30 @@ merge_favorites() {
     return 1
   }
 
+  declare -A source_favorite_by_path_map # path -> favorite_status (true/false/empty)
+  declare -A source_favorite_by_name_map # name -> favorite_status (true/false/empty)
+  declare -A source_game_paths # Stores all paths found in source, for existence check
+  declare -A source_game_names # Stores all names found in source, for existence check
+
+  # NEW OPTIMIZATION: Read all game paths, names, and favorite statuses from SOURCE gamelist once into associative arrays
+  local source_all_favorites_data=$(xmlstarlet sel -t -m "/gameList/game" \
+    -v "concat(path,'|',name,'|',favorite)" -n "$gamelist_source_temp" 2>/dev/null)
+
+  while IFS='|' read -r s_path s_name s_favorite_status; do
+    if [ -n "$s_path" ]; then
+      source_game_paths["$s_path"]=true
+      source_favorite_by_path_map["$s_path"]="$s_favorite_status"
+    fi
+    if [ -n "$s_name" ]; then
+      source_game_names["$s_name"]=true
+      source_favorite_by_name_map["$s_name"]="$s_favorite_status"
+    fi
+  done <<< "$source_all_favorites_data"
+
   local favorites_updated=0
   declare -a xmlstarlet_args=() # Use an array for arguments
 
-  # Extract paths and names of favorited games from the target gamelist in one go
+  # Extract paths and names of favorited games from the target gamelist
   local favorite_games_data=$(xmlstarlet sel -t -m "/gameList/game[favorite='true']" \
     -v "path" -o "|" -v "name" -n "$gamelist_target_existing" 2>/dev/null)
 
@@ -277,44 +314,42 @@ merge_favorites() {
       continue
     fi
 
-    local marked_favorite=false
+    local current_favorite_status="" # Default to empty
+    local game_xpath="" # Initialize, will be set if a match is found
+    local game_found_in_source=false
+
+    # NEW OPTIMIZATION: Check for existence and get current favorite status from in-memory maps
+    # Prioritize path match
     if [ -n "$old_path" ]; then
-      local escaped_old_path=$(escape_for_xpath "$old_path")
-      # Check if game exists by path in source temp gamelist
-      if xmlstarlet sel -t -v "count(/gameList/game[normalize-space(path) = normalize-space($escaped_old_path)])" "$gamelist_source_temp" | grep -q "1"; then
-        # Check if 'favorite' element exists, if not, add it. If it exists, update it.
-        if xmlstarlet sel -t -v "count(/gameList/game[normalize-space(path) = normalize-space($escaped_old_path)]/favorite)" "$gamelist_source_temp" | grep -q "1"; then
-          xmlstarlet_args+=("-u" "/gameList/game[normalize-space(path) = normalize-space($escaped_old_path)]/favorite" -v "true")
-          log_message "  - Scheduled favorite update (by path): $old_path"
-        else
-          xmlstarlet_args+=("-s" "/gameList/game[normalize-space(path) = normalize-space($escaped_old_path)]" "-t" "elem" "-n" "favorite" -v "true")
-          log_message "  - Scheduled favorite add (by path): $old_path"
-        fi
-        marked_favorite=true
+      if [[ "${source_game_paths[$old_path]:-}" == "true" ]]; then
+        game_found_in_source=true
+        current_favorite_status="${source_favorite_by_path_map[$old_path]}"
+        game_xpath="/gameList/game[normalize-space(path) = normalize-space($(escape_for_xpath "$old_path"))]"
       fi
     fi
 
-    if ! "$marked_favorite" && [ -n "$old_name" ]; then
-      local escaped_old_name=$(escape_for_xpath "$old_name")
-      # Check if game exists by name in source temp gamelist
-      # Using normalize-space() for robustness here too
-      if xmlstarlet sel -t -v "count(/gameList/game[normalize-space(name) = normalize-space($escaped_old_name)])" "$gamelist_source_temp" | grep -q "1"; then
-        # Check if 'favorite' element exists, if not, add it. If it exists, update it.
-        if xmlstarlet sel -t -v "count(/gameList/game[normalize-space(name) = normalize-space($escaped_old_name)]/favorite)" "$gamelist_source_temp" | grep -q "1"; then
-          xmlstarlet_args+=("-u" "/gameList/game[normalize-space(name) = normalize-space($escaped_old_name)]/favorite" -v "true")
-          log_message "  - Scheduled favorite update (by name): $old_name"
-        else
-          xmlstarlet_args+=("-s" "/gameList/game[normalize-space(name) = normalize-space($escaped_old_name)]" "-t" "elem" "-n" "favorite" -v "true")
-          log_message "  - Scheduled favorite add (by name): $old_name"
-        fi
-        marked_favorite=true
+    # Fallback to name match if path didn't yield a match or if path is empty
+    if ! "$game_found_in_source" && [ -n "$old_name" ]; then
+      if [[ "${source_game_names[$old_name]:-}" == "true" ]]; then
+        game_found_in_source=true
+        current_favorite_status="${source_favorite_by_name_map[$old_name]}"
+        game_xpath="/gameList/game[normalize-space(name) = normalize-space($(escape_for_xpath "$old_name"))]"
       fi
     fi
-    
-    if "$marked_favorite"; then
-      favorites_updated=$((favorites_updated + 1))
-    fi
 
+    # Only proceed if a game was actually found in the source gamelist
+    if "$game_found_in_source"; then
+        if [[ "$current_favorite_status" != "true" ]]; then
+            if [[ -n "$current_favorite_status" ]]; then # Favorite tag exists but is not 'true' (e.g., 'false' or empty)
+                xmlstarlet_args+=("-u" "$game_xpath/favorite" -v "true")
+                log_message "  - Scheduled favorite update (by path/name): ${old_path:-$old_name} (was '$current_favorite_status')"
+            else # Favorite tag does not exist
+                xmlstarlet_args+=("-s" "$game_xpath" "-t" "elem" "-n" "favorite" -v "true")
+                log_message "  - Scheduled favorite add (by path/name): ${old_path:-$old_name}"
+            fi
+            favorites_updated=$((favorites_updated + 1))
+        fi
+    fi
   done <<< "$favorite_games_data"
 
   if [ $favorites_updated -gt 0 ]; then
@@ -335,7 +370,6 @@ merge_favorites() {
   
   return 0
 }
-
 
 # --- Function to rename target directories back to source names (pre-sync) ---
 unrename_target_directories() {
@@ -552,12 +586,35 @@ export GLOBAL_SOURCE_BASE target_dir log_file silent_mode fields_to_preserve exc
 export tools_dir media_target_base media_folders miximages_name # Export media variables
 export gamelist_target_base # Export gamelist target base variable
 
-
 main() {
   # --- Check for silent mode and process arguments ---
   declare -a targeted_systems=() # Initialize array globally, no 'local' here.
+  
+  # Parse command-line arguments
   for arg in "$@"; do
-    case "$arg" intransferrable
+    case "$arg" in
+      -h|--help)
+        show_help
+        exit 0
+        ;;
+      -s|--silent)
+        silent_mode=true
+        ;;
+      -n|--dry-run)
+        dry_run_mode=true
+        ;;
+      --skip-gamelist-sync)
+        skip_gamelist_sync=true
+        ;;
+      --purge)
+        purge_target=true
+        ;;
+      -*) # Catch any other arguments starting with a hyphen (unknown options)
+        log_message "Error: Unknown option: $arg" >&2
+        show_help
+        exit 1
+        ;;
+      *) # Any argument not starting with a hyphen is treated as a system name
         targeted_systems+=("$arg")
         ;;
     esac
@@ -788,4 +845,4 @@ main() {
   sync
 }
 
-main "$@"transferrable
+main "$@"
