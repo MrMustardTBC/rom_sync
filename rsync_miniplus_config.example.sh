@@ -28,4 +28,8 @@ declare -A rename_folders=(
   ["neogeocd"]="NEOCD"
   ["sg1000"]="SEGASGONE"
   ["gameandwatch"]="GW"
+  ["colecovision"]="COLECO"
+  ["videopacplus"]="VIDEOPAC"
+  ["channelf"]="FAIRCHILD"
+  ["tic80"]="TIC"
 )
