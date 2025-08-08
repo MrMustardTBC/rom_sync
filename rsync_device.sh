@@ -1,46 +1,48 @@
 #!/bin/bash
 
-set -euo pipefail # Exit on error, unset variables, and pipe failures
-IFS=$' \n\t' 
+set -euo pipefail
+IFS=$' \n\t'
 
-log_file="${0}.log" # Log to a file named after the script
+if [ $# -lt 1 ]; then
+  echo "Usage: $0 <device> [options...]"
+  echo "Example: $0 rg35xxh [other options]"
+  exit 1
+fi
 
-silent_mode=false  # Default: logging enabled
-min_free_space_gb=1  # Minimum free space in GB
-skip_gamelist_sync=false # New flag for skipping gamelist sync
-purge_target=false # New flag for purging files from target not in source
+device="$1"
+shift
 
-# Fields to preserve from target gamelist to source
-fields_to_preserve=("crc32" "cheevosId" "cheevosHash")
+config_file="rsync_${device}_config.sh"
 
-# Source common parameters
-if [ -f "./common_config.sh" ]; then
-  source "./common_config.sh"
-else
+if [ ! -f "./common_config.sh" ]; then
   echo "Error: common_config.sh not found."
   exit 1
 fi
+source "./common_config.sh"
 
-# Source script-specific parameters
-if [ -f "./rsync_brick_config.sh" ]; then
-  source "./rsync_brick_config.sh"
-else
-  echo "Error: rsync_brick_config.sh not found."
+if [ ! -f "./$config_file" ]; then
+  echo "Error: $config_file not found."
   exit 1
 fi
+source "./$config_file"
 
-# Use parameters from both config files
-echo "Syncing from $GLOBAL_SOURCE_BASE to $target_dir using options $GLOBAL_RSYNC_OPTIONS"
+log_file="${0%.sh}_${device}.log"
 
-# Create a reverse mapping for convenience. Because we're thorough.
+silent_mode=false
+min_free_space_gb=1
+skip_gamelist_sync=false
+purge_target=false
+fields_to_preserve=("crc32" "cheevosId" "cheevosHash")
+
 declare -A reverse_rename_folders
 for original in "${!rename_folders[@]}"; do
   new="${rename_folders[$original]}"
   reverse_rename_folders["$new"]="$original"
 done
 
+
 show_help() {
-  echo "Usage: $(basename "$0") [options] [SYSTEM_NAME1 SYSTEM_NAME2 ...]"
+  echo "Usage: $(basename "$0") <device> [options] [SYSTEM_NAME1 SYSTEM_NAME2 ...]"
   echo ""
   echo "Synchronizes ROMs from a source directory to a target device."
   echo "If no SYSTEM_NAMEs are provided, performs a full sync of all non-excluded systems."
@@ -54,8 +56,18 @@ show_help() {
   echo ""
   echo "Configuration is loaded from:"
   echo "  - ./common_config.sh (global settings)"
-  echo "  - ${0%.sh}_config.sh (script-specific settings, e.g., rsync_brick_config.sh)"
+  echo "  - rsync_<device>_config.sh (script-specific settings)"
   echo "Please ensure these files exist and are configured correctly."
+}
+
+log_message() {
+  local message="$1"
+  if ! "$silent_mode"; then
+    local timestamp=$(date "+%Y-%m-%dT%H:%M:%S%z")
+    echo "$timestamp - $message"
+  fi
+  local timestamp=$(date "+%Y-%m-%dT%H:%M:%S%z")
+  echo "$timestamp - $message" >> "$log_file"
 }
 
 check_dir_exists() {
@@ -70,89 +82,80 @@ check_free_space() {
   local dir="$1"
   local required_gb="$2"
   local free_kb=$(df -k "$dir" | tail -n 1 | awk '{print $4}')
-  local free_bytes=$((free_kb * 1024))  # Convert KB to bytes
-  local free_gb=$((free_bytes / 1024 / 1024 / 1024))
-
+  local free_bytes=0
+  local free_gb=0
+  # Check if free_kb is a valid integer
+  if [[ -z "$free_kb" || ! "$free_kb" =~ ^[0-9]+$ ]]; then
+    log_message "Warning: Could not determine free space for '$dir'. df output: '$free_kb'" >&2
+    free_gb=0
+  else
+    free_bytes=$((free_kb * 1024))
+    free_gb=$((free_bytes / 1024 / 1024 / 1024))
+  fi
+  # Check if required_gb is a valid integer
+  if [[ -z "$required_gb" || ! "$required_gb" =~ ^[0-9]+$ ]]; then
+    log_message "Warning: Required GB value is not a valid integer: '$required_gb'" >&2
+    required_gb=1
+  fi
+  log_message "Debug: Free space on '$dir': $free_gb GB, Required: $required_gb GB"
   if [ "$free_gb" -lt "$required_gb" ]; then
     log_message "Error: Insufficient free space on '$dir'. Required: $required_gb GB, Available: $free_gb GB" >&2
     exit 1
   fi
 }
 
-# --- Optimized Function to merge preserved fields from target to source ---
 merge_preserved_fields() {
+  # ...existing code from device scripts...
   local system_name="$1"
   local source_rom_dir="${GLOBAL_SOURCE_BASE}/${system_name}"
   local target_rom_dir="${target_dir}/${system_name}"
   local gamelist_source="${source_rom_dir}/gamelist.xml"
   local gamelist_target="${target_rom_dir}/gamelist.xml"
-
   log_message "Merging preserved fields for $system_name..."
-
   if [ ! -f "$gamelist_source" ]; then
     log_message "  - Source gamelist.xml not found: '$gamelist_source'. Skipping field merge."
     return 0
   fi
-
   if [ ! -f "$gamelist_target" ]; then
     log_message "  - Target gamelist.xml not found: '$gamelist_target'. Skipping field merge."
     return 0
   fi
-
   if ! command -v xmlstarlet &> /dev/null; then
     log_message "  - xmlstarlet not found. Cannot merge fields."
     return 1
   fi
-
-  # Create a temporary file for the source gamelist
   local gamelist_source_temp="${gamelist_source}.temp"
   cp "$gamelist_source" "$gamelist_source_temp" || {
     log_message "Error: Failed to create temporary gamelist file." >&2
     return 1
   }
-
   local fields_updated=0
   local xmlstarlet_commands=""
-
-  # Read target gamelist and build xmlstarlet commands
-  # The following command extracts id, path, and then the values for fields_to_preserve for each game.
   target_games_data=$(xmlstarlet sel -t -m "/gameList/game[@id and @id!='0' and @id!='']" \
     -v "concat(@id,'|',path,'|',crc32,'|',cheevosId,'|',cheevosHash)" -n "$gamelist_target" 2>/dev/null)
-
-  # Check if target_games_data is empty, indicating no relevant games or fields
   if [ -z "$target_games_data" ]; then
     log_message "  - No game IDs with preserved fields found in target gamelist '$gamelist_target'. Skipping merge."
     rm -f "$gamelist_source_temp"
     return 0
   fi
-
   while IFS='|' read -r game_id game_path crc32_val cheevosId_val cheevosHash_val; do
-    # Skip if game_path is empty; we are now primarily matching by path
     if [ -z "$game_path" ]; then
       log_message "    - Game entry (ID $game_id) has no path, skipping merge for this entry."
       continue
     fi
-    
-    # Try finding by path first, as it's more reliable for ROM files
-    # Using normalize-space() for robustness against leading/trailing whitespace in paths
     local game_exists=$(xmlstarlet sel -t -v "count(/gameList/game[normalize-space(path) = normalize-space('$game_path')])" "$gamelist_source_temp" 2>/dev/null)
-    
     if [ "$game_exists" -gt 0 ]; then
       log_message "  - Processing game (path match): $game_path"
-      # Build the xmlstarlet command string for this game, targeting by path
       for field in "${fields_to_preserve[@]}"; do
         local field_value
         case "$field" in
           "crc32") field_value="$crc32_val";;
           "cheevosId") field_value="$cheevosId_val";;
           "cheevosHash") field_value="$cheevosHash_val";;
-          *) continue;; # Should not happen
+          *) continue;;
         esac
-
         if [ -n "$field_value" ]; then
-          # Check if the field exists for this game in the source (by path)
           local field_exists=$(xmlstarlet sel -t -v "count(/gameList/game[normalize-space(path) = normalize-space('$game_path')]/$field)" "$gamelist_source_temp" 2>/dev/null)
-          
           if [ "$field_exists" -gt 0 ]; then
             xmlstarlet_commands+=" -u \"/gameList/game[normalize-space(path) = normalize-space('$game_path')]/$field\" -v \"$field_value\""
             log_message "    - Scheduled update for $field for game path $game_path"
@@ -167,7 +170,6 @@ merge_preserved_fields() {
       log_message "    - Game path '$game_path' (ID $game_id) not found in source gamelist. Skipping field merge."
     fi
   done <<< "$target_games_data"
-
   if [ $fields_updated -gt 0 ]; then
     log_message "  - Applying $fields_updated field updates/additions to $system_name..."
     eval "xmlstarlet ed -L $xmlstarlet_commands \"$gamelist_source_temp\"" || {
@@ -183,53 +185,41 @@ merge_preserved_fields() {
     log_message "  - No fields updated for $system_name"
     rm -f "$gamelist_source_temp"
   fi
-  
   return 0
 }
 
-# --- Optimized Function to merge favorites ---
 merge_favorites() {
   local system_name="$1"
   local source_rom_dir="${GLOBAL_SOURCE_BASE}/${system_name}"
   local target_rom_dir="${target_dir}/${system_name}"
   local gamelist_source="${source_rom_dir}/gamelist.xml"
   local gamelist_target_existing="${target_dir}/${system_name}/gamelist.xml"
-
-  log_message "Attempting to merge favorites for $system_name (pre-rsync)..."
-
+  log_message "Attempting to merge favorites and hidden status for $system_name (pre-rsync)..."
   if [ ! -f "$gamelist_source" ]; then
-    log_message "  - Source gamelist.xml not found: '$gamelist_source'. Skipping favorite merge for this system."
+    log_message "  - Source gamelist.xml not found: '$gamelist_source'. Skipping favorite/hidden merge for this system."
     return 0
   fi
-
   if [ ! -f "$gamelist_target_existing" ] || ! command -v xmlstarlet &> /dev/null; then
-    log_message "  - Debug: Old gamelist.xml not found or xmlstarlet not installed for $system_name. Skipping favorite merge."
+    log_message "  - Debug: Old gamelist.xml not found or xmlstarlet not installed for $system_name. Skipping favorite/hidden merge."
     return 0
   fi
-
   local gamelist_source_temp="${gamelist_source}.temp"
   cp "$gamelist_source" "$gamelist_source_temp" || {
-    log_message "Error: Failed to create temporary gamelist file for favorites." >&2
+    log_message "Error: Failed to create temporary gamelist file for favorites/hidden." >&2
     return 1
   }
-
-  local favorites_updated=0
+  local updates=0
   local xmlstarlet_commands=""
-
-  # Extract paths and names of favorited games from the target gamelist in one go
+  # Merge favorites
   local favorite_games_data=$(xmlstarlet sel -t -m "/gameList/game[favorite='true']" \
     -v "path" -o "|" -v "name" -n "$gamelist_target_existing" 2>/dev/null)
-
   while IFS='|' read -r old_path old_name; do
     if [ -z "$old_path" ] && [ -z "$old_name" ]; then
       continue
     fi
-
     local marked_favorite=false
     if [ -n "$old_path" ]; then
-      # Check if game exists by path in source temp gamelist
       if xmlstarlet sel -t -v "count(/gameList/game[normalize-space(path) = normalize-space('$old_path')])" "$gamelist_source_temp" | grep -q "1"; then
-        # Check if 'favorite' element exists, if not, add it. If it exists, update it.
         if xmlstarlet sel -t -v "count(/gameList/game[normalize-space(path) = normalize-space('$old_path')]/favorite)" "$gamelist_source_temp" | grep -q "1"; then
           xmlstarlet_commands+=" -u \"/gameList/game[normalize-space(path) = normalize-space('$old_path')]/favorite\" -v \"true\""
           log_message "  - Scheduled favorite update (by path): $old_path"
@@ -240,12 +230,8 @@ merge_favorites() {
         marked_favorite=true
       fi
     fi
-
     if ! "$marked_favorite" && [ -n "$old_name" ]; then
-      # Check if game exists by name in source temp gamelist
-      # Using normalize-space() for robustness here too
       if xmlstarlet sel -t -v "count(/gameList/game[normalize-space(name) = normalize-space('$old_name')])" "$gamelist_source_temp" | grep -q "1"; then
-        # Check if 'favorite' element exists, if not, add it. If it exists, update it.
         if xmlstarlet sel -t -v "count(/gameList/game[normalize-space(name) = normalize-space('$old_name')]/favorite)" "$gamelist_source_temp" | grep -q "1"; then
           xmlstarlet_commands+=" -u \"/gameList/game[normalize-space(name) = normalize-space('$old_name')]/favorite\" -v \"true\""
           log_message "  - Scheduled favorite update (by name): $old_name"
@@ -256,17 +242,52 @@ merge_favorites() {
         marked_favorite=true
       fi
     fi
-    
     if "$marked_favorite"; then
-      favorites_updated=$((favorites_updated + 1))
+      updates=$((updates + 1))
     fi
-
   done <<< "$favorite_games_data"
 
-  if [ $favorites_updated -gt 0 ]; then
-    log_message "  - Applying $favorites_updated favorite updates/additions to $system_name..."
+  # Merge hidden status
+  local hidden_games_data=$(xmlstarlet sel -t -m "/gameList/game[hidden='true']" \
+    -v "path" -o "|" -v "name" -n "$gamelist_target_existing" 2>/dev/null)
+  while IFS='|' read -r old_path old_name; do
+    if [ -z "$old_path" ] && [ -z "$old_name" ]; then
+      continue
+    fi
+    local marked_hidden=false
+    if [ -n "$old_path" ]; then
+      if xmlstarlet sel -t -v "count(/gameList/game[normalize-space(path) = normalize-space('$old_path')])" "$gamelist_source_temp" | grep -q "1"; then
+        if xmlstarlet sel -t -v "count(/gameList/game[normalize-space(path) = normalize-space('$old_path')]/hidden)" "$gamelist_source_temp" | grep -q "1"; then
+          xmlstarlet_commands+=" -u \"/gameList/game[normalize-space(path) = normalize-space('$old_path')]/hidden\" -v \"true\""
+          log_message "  - Scheduled hidden update (by path): $old_path"
+        else
+          xmlstarlet_commands+=" -s \"/gameList/game[normalize-space(path) = normalize-space('$old_path')]\" -t elem -n \"hidden\" -v \"true\""
+          log_message "  - Scheduled hidden add (by path): $old_path"
+        fi
+        marked_hidden=true
+      fi
+    fi
+    if ! "$marked_hidden" && [ -n "$old_name" ]; then
+      if xmlstarlet sel -t -v "count(/gameList/game[normalize-space(name) = normalize-space('$old_name')])" "$gamelist_source_temp" | grep -q "1"; then
+        if xmlstarlet sel -t -v "count(/gameList/game[normalize-space(name) = normalize-space('$old_name')]/hidden)" "$gamelist_source_temp" | grep -q "1"; then
+          xmlstarlet_commands+=" -u \"/gameList/game[normalize-space(name) = normalize-space('$old_name')]/hidden\" -v \"true\""
+          log_message "  - Scheduled hidden update (by name): $old_name"
+        else
+          xmlstarlet_commands+=" -s \"/gameList/game[normalize-space(name) = normalize-space('$old_name')]\" -t elem -n \"hidden\" -v \"true\""
+          log_message "  - Scheduled hidden add (by name): $old_name"
+        fi
+        marked_hidden=true
+      fi
+    fi
+    if "$marked_hidden"; then
+      updates=$((updates + 1))
+    fi
+  done <<< "$hidden_games_data"
+
+  if [ $updates -gt 0 ]; then
+    log_message "  - Applying $updates favorite/hidden updates/additions to $system_name..."
     eval "xmlstarlet ed -L $xmlstarlet_commands \"$gamelist_source_temp\"" || {
-      log_message "Error: Failed to apply xmlstarlet edits for favorites." >&2
+      log_message "Error: Failed to apply xmlstarlet edits for favorites/hidden." >&2
       rm -f "$gamelist_source_temp"
       return 1
     }
@@ -275,28 +296,23 @@ merge_favorites() {
       return 1
     }
   else
-    log_message "  - No favorites updated for $system_name"
+    log_message "  - No favorites/hidden updated for $system_name"
     rm -f "$gamelist_source_temp"
   fi
-  
   return 0
 }
 
-
-# --- Function to rename target directories back to source names (pre-sync) ---
 unrename_target_directories() {
   local new_name original_name target_new_dir target_original_dir should_process sys
-  log_message "Attempting to unrename target directories on brick (pre-rsync)..."
-  # Optimized: Only iterate through reverse_rename_folders for efficiency.
+  log_message "Attempting to unrename target directories on $device (pre-rsync)..."
   for new_name in "${!reverse_rename_folders[@]}"; do
     original_name="${reverse_rename_folders[$new_name]}"
     target_new_dir="${target_dir}/${new_name}"
     target_original_dir="${target_dir}/${original_name}"
-
     should_process=false
-    if [ ${#targeted_systems[@]} -eq 0 ]; then # Full sync, unrename all
+    if [ ${#targeted_systems[@]} -eq 0 ]; then
       should_process=true
-    else # Targeted sync, unrename only the specific original system
+    else
       for sys in "${targeted_systems[@]}"; do
         if [ "$sys" = "$original_name" ]; then
           should_process=true
@@ -304,7 +320,6 @@ unrename_target_directories() {
         fi
       done
     fi
-
     if "$should_process"; then
       if [ -d "$target_new_dir" ]; then
         log_message "  - Renaming '$target_new_dir' back to '$target_original_dir' for rsync."
@@ -314,20 +329,17 @@ unrename_target_directories() {
   done
 }
 
-# --- Function to rename target directories to their new names (post-sync) ---
 rename_target_directories() {
   local original_name new_name target_original_dir target_new_dir should_process sys
-  log_message "Attempting to rename target directories on brick (post-rsync)..."
-  # Optimized: Only iterate through rename_folders for efficiency.
+  log_message "Attempting to rename target directories on $device (post-rsync)..."
   for original_name in "${!rename_folders[@]}"; do
     new_name="${rename_folders[$original_name]}"
     target_original_dir="${target_dir}/${original_name}"
     target_new_dir="${target_dir}/${new_name}"
-
     should_process=false
-    if [ ${#targeted_systems[@]} -eq 0 ]; then # Full sync, rename all
+    if [ ${#targeted_systems[@]} -eq 0 ]; then
       should_process=true
-    else # Targeted sync, rename only the specific original system
+    else
       for sys in "${targeted_systems[@]}"; do
         if [ "$sys" = "$original_name" ]; then
           should_process=true
@@ -335,7 +347,6 @@ rename_target_directories() {
         fi
       done
     fi
-
     if "$should_process"; then
       if [ -d "$target_original_dir" ]; then
         log_message "  - Renaming '$target_original_dir' to '$target_new_dir'."
@@ -347,32 +358,56 @@ rename_target_directories() {
   done
 }
 
-# --- Wrapper function for parallel gamelist processing ---
-# This function is executed in a subshell by xargs.
-# It needs access to other functions and global variables.
 process_gamelist_for_system() {
   local system_name="$1"
   log_message "BEGIN parallel gamelist processing for $system_name"
-  # These functions are now exported, so they are available in the subshell.
   merge_preserved_fields "$system_name"
   merge_favorites "$system_name"
   log_message "END parallel gamelist processing for $system_name"
 }
 
-# --- Export all necessary functions and variables for subshells ---
-# Functions called by process_gamelist_for_system need to be exported.
 export -f log_message check_dir_exists check_free_space merge_preserved_fields merge_favorites process_gamelist_for_system
-# Variables used by the exported functions need to be exported.
-export GLOBAL_SOURCE_BASE target_dir log_file silent_mode fields_to_preserve exclude_dirs rename_folders reverse_rename_folders # Export rename arrays as well
+export GLOBAL_SOURCE_BASE target_dir log_file silent_mode fields_to_preserve exclude_dirs rename_folders reverse_rename_folders
 
 main() {
-  # --- Check for silent mode and process arguments ---
-  declare -a targeted_systems=() # Initialize array globally, no 'local' here.
+  # Device-specific pre-sync hooks
+  if [[ "$device" == "steamdeck" ]]; then
+    log_message "Checking for tools directory: $tools_dir"
+    check_dir_exists "$tools_dir"
+    log_message "Checking for media target base directory: $media_target_base"
+    mkdir -p "$media_target_base"
+    if [ ! -d "$media_target_base" ]; then
+      log_message "Error: Failed to create or find media target base directory: $media_target_base" >&2
+      exit 1
+    fi
+    log_message "Reversing media folder moves (before rsync)..."
+    for system in "${targeted_systems[@]}"; do
+      if [[ -n "${media_folders[*]:-}" && -n "${miximages_name:-}" ]]; then
+        local target_system_dir="${target_dir}/${system}"
+        local media_target_dir="${media_target_base}/${system}"
+        log_message "  - Reversing media folder moves for $system..."
+        for folder in "${media_folders[@]}"; do
+          local source_folder="${media_target_dir}/${folder}"
+          local dest_folder="${target_system_dir}/${folder}"
+          if [ "$folder" == "Imgs" ]; then
+            source_folder="${media_target_dir}/${miximages_name}"
+          fi
+          if [ -d "$source_folder" ]; then
+            log_message "    - Moving '$source_folder' back to '$dest_folder'"
+            mkdir -p "$(dirname "$dest_folder")"
+            mv "$source_folder" "$dest_folder" || log_message "    - Warning: Failed to move '$source_folder'."
+          fi
+        done
+      fi
+    done
+    sync
+  fi
+  declare -a targeted_systems=()
   for arg in "$@"; do
     case "$arg" in
-      -h|--help) 
+      -h|--help)
         show_help
-        exit 0 # Exit after showing help
+        exit 0
         ;;
       -s|--silent)
         silent_mode=true
@@ -380,11 +415,11 @@ main() {
       --skip-gamelist-sync)
         skip_gamelist_sync=true
         ;;
-      -n|--dry-run) 
+      -n|--dry-run)
         dry_run_mode=true
         log_message "Dry run mode enabled: rsync will not make changes."
         ;;
-      --purge) 
+      --purge)
         purge_target=true
         ;;
       *)
@@ -392,25 +427,15 @@ main() {
         ;;
     esac
   done
-
-  # --- Check for targeted update arguments ---
   if [ ${#targeted_systems[@]} -gt 0 ]; then
     log_message "Targeted update for: ${targeted_systems[@]}"
   else
     log_message "Full sync from: ${GLOBAL_SOURCE_BASE}"
-    # When doing a full sync, we need to populate targeted_systems with all
-    # source directories that are not excluded, so the rename logic works.
-    # Use a loop with read -r -d $'\0' to process null-separated output robustly.
-    # Removed 'local' from system_name and is_excluded declarations within this while loop.
     while IFS= read -r -d $'\0' full_path; do
-      # Extract just the basename of the directory
-      local system_name=$(basename "$full_path") 
-
-      # Skip if system_name is empty or just '.'
+      local system_name=$(basename "$full_path")
       if [ -z "$system_name" ] || [ "$system_name" = "." ]; then
         continue
       fi
-
       local is_excluded=false
       for exclude_dir in "${exclude_dirs[@]}"; do
         if [ "$system_name" = "$exclude_dir" ]; then
@@ -424,60 +449,33 @@ main() {
       fi
     done < <(find "${GLOBAL_SOURCE_BASE}" -maxdepth 1 -mindepth 1 -type d -print0)
   fi
-
   log_message "Targeted systems for this run: ${targeted_systems[@]}"
-
-  # --- Check if source and target base directories exist ---
   log_message "Checking for source directory: $GLOBAL_SOURCE_BASE"
   check_dir_exists "$GLOBAL_SOURCE_BASE"
   log_message "Checking for target directory: $target_dir"
   check_dir_exists "$target_dir"
-
-  # --- Pre-sync operations ---
   unrename_target_directories
-  # Add a single sync here after all renames are done, if any.
-  if [ ${#rename_folders[@]} -gt 0 ]; then # Only sync if there are actual renames configured
+  if [ ${#rename_folders[@]} -gt 0 ]; then
     log_message "Executing sync after pre-rsync directory renames."
     sync
   fi
-
-  # --- Check free space on target ---
   check_free_space "$target_dir" "$min_free_space_gb"
-
-  # --- Conditional Gamelist Sync (Parallelized) ---
   if ! "$skip_gamelist_sync"; then
     log_message "Starting parallel gamelist.xml metadata synchronization for ${#targeted_systems[@]} systems."
-    
-    # Pipe the targeted systems to xargs for parallel execution
-    # -P $(nproc --all) will use as many parallel processes as CPU cores. Adjust if needed.
-    # -I {} replaces {} with each argument (system name)
-    # The bash -c command now properly finds exported functions and variables.
     printf '%s\n' "${targeted_systems[@]}" | xargs -P "$(nproc --all)" -I {} bash -c 'process_gamelist_for_system "{}"'
-
-    # Consolidate sync here after all parallel gamelist operations are done.
-    if [ ${#targeted_systems[@]} -gt 0 ]; then # Only sync if some systems were processed
+    if [ ${#targeted_systems[@]} -gt 0 ]; then
       log_message "Executing sync after all gamelist operations."
       sync
     fi
   else
     log_message "Skipping gamelist.xml metadata synchronization as --skip-gamelist-sync flag is present."
   fi
-
-  # --- Calculate number of files to copy ---
   log_message "Calculating number of files and directories in the logical romset..."
   total_items_to_copy=0
-
   for system in "${targeted_systems[@]}"; do
       local source_path="${GLOBAL_SOURCE_BASE}/${system}"
-      
-      # Start a find command for each targeted system
       find_command="find \"$source_path\" -mindepth 1"
-
-      # Add excludes for directories that should not be part of this system's sync
       for exclude_dir_name in "${exclude_dirs[@]}"; do
-          # Only exclude if this system's path is not the exclude_dir itself
-          # and the exclude_dir is not one of the targeted systems.
-          # This prevents excluding the very system we are trying to count.
           local is_targeted_exclude=false
           for targeted_sys in "${targeted_systems[@]}"; do
               if [ "$exclude_dir_name" = "$targeted_sys" ]; then
@@ -485,55 +483,27 @@ main() {
                   break
               fi
           done
-
           if [ "$exclude_dir_name" != "$system" ] && ! "$is_targeted_exclude"; then
               find_command+=" -not -path \"$source_path/$exclude_dir_name/*\" -not -path \"$source_path/$exclude_dir_name\""
           fi
       done
-      
-      # Execute the find command and count lines (each line is an item)
-      # Exclude the root system directory itself to count its contents
       current_system_items=$(eval "$find_command" 2>/dev/null | wc -l)
       total_items_to_copy=$((total_items_to_copy + current_system_items))
       log_message "  - System '$system': $current_system_items items."
   done
-
   log_message "Total items (files and directories) in logical romset to copy: $total_items_to_copy"
-  # --- End of file calculation ---
-  # --- rsync systems ---
   log_message "Syncing systems..."
-  # ... (other code) ...
-
-  # Explicitly convert GLOBAL_RSYNC_OPTIONS string into an array of options
-  # using read -r -a for robust splitting.
   local rsync_options_array=()
   read -r -a rsync_options_array <<< "$GLOBAL_RSYNC_OPTIONS"
-
-  # Initialize rsync arguments as an array: first element is 'rsync',
-  # followed by the now-correctly-split global options.
   rsync_args=("${rsync_options_array[@]}")
-
-  # Add --delete flag if purge_target is true
   if "$purge_target"; then
-    rsync_args+=(--delete)
+    rsync_args+=(--delete-after)
     log_message "Purge mode enabled: rsync will delete extraneous files from target."
   fi
-
-  # Build the rsync command with individual source system paths
   for system in "${targeted_systems[@]}"; do
-      # If a system is targeted, we need to ensure its original name is passed to rsync
-      # as the target directories have been "unrenamed" by now.
-      # No need for \" or \\\" here, the array element handles spaces.
       rsync_args+=("${GLOBAL_SOURCE_BASE}/${system}")
   done
-
-  # Add target directory - ensure trailing slash for directory content sync
-  # No need for \" or \\\" here.
   rsync_args+=("${target_dir}/")
-
-  # Dynamically add excludes: always exclude if not explicitly targeted.
-  # This prevents accidentally syncing excluded directories if they exist in GLOBAL_SOURCE_BASE
-  # but are not part of the targeted systems.
   for dir in "${exclude_dirs[@]}"; do
     should_exclude=true
     for targeted_sys in "${targeted_systems[@]}"; do
@@ -543,31 +513,67 @@ main() {
       fi
     done
     if "$should_exclude"; then
-      # No need for \" or \\\" here, the array element handles spaces.
-      rsync_args+=("--exclude=${dir}/") # Add trailing slash to exclude directory content
+      rsync_args+=("--exclude=${dir}/")
     fi
   done
-
-  # --- Execution ---
-  # Log the command before running (for debugging, expand the array elements)
   log_message "Running rsync: ${rsync_args[*]}"
-
-  # Execute the rsync command using the array.
-  # "${rsync_args[@]}" expands each element of the array into a separate argument,
-  # correctly handling spaces and special characters.
   rsync "${rsync_args[@]}" 2>> "$log_file" || {
-    rsync_exit_status=$? # Capture the exit status
-    rsync_err=$(tail -n 5 "$log_file") # Get last 5 lines of error
+    rsync_exit_status=$?
+    rsync_err=$(tail -n 5 "$log_file")
     log_message "Error: rsync operation failed with exit code $rsync_exit_status. Details: $rsync_err" >&2
-    echo "rsync error: $rsync_err" >&2 # Also print to console
-    exit "$rsync_exit_status" # Exit with the rsync error code
-}
-
-  # --- Post-sync operations ---
+    echo "rsync error: $rsync_err" >&2
+    exit "$rsync_exit_status"
+  }
   rename_target_directories
 
-  # Final sync to ensure all writes are flushed
-  log_message "brick sync and modifications complete."
+  # Device-specific post-sync hooks
+  if [[ "$device" == "steamdeck" ]]; then
+    log_message "Moving media folders (after rsync)..."
+    for system in "${targeted_systems[@]}"; do
+      if [[ -n "${media_folders[*]:-}" && -n "${miximages_name:-}" ]]; then
+        local target_system_dir="${target_dir}/${system}"
+        local media_target_dir="${media_target_base}/${system}"
+        log_message "  - Attempting to move media folders for $system..."
+        log_message "    - Target system directory: $target_system_dir"
+        log_message "    - Media target directory: $media_target_dir"
+        mkdir -p "$media_target_dir" || log_message "    - Warning: Failed to create '$media_target_dir'."
+        for folder in "${media_folders[@]}"; do
+          local source_folder="${target_system_dir}/${folder}"
+          local dest_folder="${media_target_dir}/${folder}"
+          log_message "    - Processing folder: $folder"
+          log_message "      - Source folder: $source_folder"
+          if [ -d "$source_folder" ]; then
+            if [ "$folder" == "Imgs" ]; then
+              dest_folder="${media_target_dir}/${miximages_name}"
+              log_message "      - Moving and renaming '$source_folder' to '$dest_folder'"
+              mv "$source_folder" "$dest_folder" || log_message "      - Warning: Failed to move and rename '$source_folder'."
+            else
+              log_message "      - Moving '$source_folder' to '$dest_folder'"
+              mv "$source_folder" "$dest_folder" || log_message "      - Warning: Failed to move '$source_folder'."
+            fi
+          else
+            log_message "      - Source folder '$source_folder' does not exist."
+          fi
+        done
+      fi
+    done
+  fi
+
+  if [[ "$device" == "miniplus" ]]; then
+    log_message "Processing gamelist.xml files for Miyoo Mini Plus..."
+    find "${target_dir}" -type f -name "gamelist.xml" -print0 | while IFS= read -r -d $'\0' file; do
+      target_system=$(basename "$(dirname "$file")")
+      if [ ${#targeted_systems[@]} -eq 0 ] || [[ " ${targeted_systems[@]} " =~ " ${target_system} " ]]; then
+        new_file="$(dirname "$file")/miyoogamelist.xml"
+        log_message "Processing '$file'..."
+        log_message "Renaming '$file' to '$new_file'"
+        mv "$file" "$new_file" || log_message "Warning: Failed to rename '$file'."
+        log_message "Cleaning '$new_file' (removing entries with id=0)..."
+        xmlstarlet ed -L -d "//game[@id='0']" "$new_file" || log_message "Warning: Failed to clean '$new_file'."
+      fi
+    done
+  fi
+  log_message "$device sync and modifications complete."
   log_message "Executing final sync command to flush write buffers."
   sync
 }
