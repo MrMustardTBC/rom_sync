@@ -563,8 +563,8 @@ main() {
     done
   fi
 
-  if [[ "$device" == "miniplus" ]]; then
-    log_message "Processing gamelist.xml files for Miyoo Mini Plus..."
+  if [[ "$onionOS" == "true" ]]; then
+    log_message "Processing gamelist.xml files for OnionOS..."
     find "${target_dir}" -type f -name "gamelist.xml" -print0 | while IFS= read -r -d $'\0' file; do
       target_system=$(basename "$(dirname "$file")")
       if [ ${#targeted_systems[@]} -eq 0 ] || [[ " ${targeted_systems[@]} " =~ " ${target_system} " ]]; then

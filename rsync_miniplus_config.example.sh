@@ -1,6 +1,8 @@
 # where your files will go
 target_dir="/your/target/path/here"
 
+onionOS="true"
+
 # Add or adjust any system-specific excludes or renames as needed
 # If it is commented out, it will be synced
 exclude_dirs=(

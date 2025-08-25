@@ -3,6 +3,8 @@
 
 target_dir="/your/target/path/here"
 
+onionOS="false"
+
 # Add or adjust any system-specific excludes or renames as needed
 # If it's commented out, it will be synced
 exclude_dirs=(

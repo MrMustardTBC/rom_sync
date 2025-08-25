@@ -1,6 +1,8 @@
 # where your files will go
 target_dir="/your/target/path/here"
 
+onionOS="false"
+
 # directories you do not want to copy
 exclude_dirs=("screenshots" "titlescreens" "gc" )
 
