@@ -9,8 +9,32 @@ if [ $# -lt 1 ]; then
   exit 1
 fi
 
+show_help() {
+  echo "Usage: $(basename "$0") <device> [options] [SYSTEM_NAME1 SYSTEM_NAME2 ...]"
+  echo ""
+  echo "Synchronizes ROMs from a source directory to a target device."
+  echo "If no SYSTEM_NAMEs are provided, performs a full sync of all non-excluded systems."
+  echo ""
+  echo "Options:"
+  echo "  -h, --help           Show this help message and exit."
+  echo "  -s, --silent         Run in silent mode (no console output, only logs)."
+  echo "  -n, --dry-run        Perform a dry run (simulate rsync, still merges gamelist.xml fields into source)."
+  echo "  --skip-gamelist-sync Skip gamelist.xml metadata synchronization (favorites, preserved fields)."
+  echo "  --purge              Enable purge mode: rsync will delete extraneous files from target that are not in source."
+  echo ""
+  echo "Configuration is loaded from:"
+  echo "  - common_config.sh (global settings)"
+  echo "  - rsync_<device>_config.sh (script-specific settings)"
+  echo "Please ensure these files exist and are configured correctly."
+}
+
 device="$1"
 shift
+
+if [ "$device" == "--help" ] || [ "$device" == "-h" ]; then
+  show_help
+  exit 1
+fi
 
 config_file="rsync_${device}_config.sh"
 
@@ -39,26 +63,6 @@ for original in "${!rename_folders[@]}"; do
   new="${rename_folders[$original]}"
   reverse_rename_folders["$new"]="$original"
 done
-
-
-show_help() {
-  echo "Usage: $(basename "$0") <device> [options] [SYSTEM_NAME1 SYSTEM_NAME2 ...]"
-  echo ""
-  echo "Synchronizes ROMs from a source directory to a target device."
-  echo "If no SYSTEM_NAMEs are provided, performs a full sync of all non-excluded systems."
-  echo ""
-  echo "Options:"
-  echo "  -h, --help           Show this help message and exit."
-  echo "  -s, --silent         Run in silent mode (no console output, only logs)."
-  echo "  -n, --dry-run        Perform a dry run (simulate rsync, still merges gamelist.xml fields into source)."
-  echo "  --skip-gamelist-sync Skip gamelist.xml metadata synchronization (favorites, preserved fields)."
-  echo "  --purge              Enable purge mode: rsync will delete extraneous files from target that are not in source."
-  echo ""
-  echo "Configuration is loaded from:"
-  echo "  - ./common_config.sh (global settings)"
-  echo "  - rsync_<device>_config.sh (script-specific settings)"
-  echo "Please ensure these files exist and are configured correctly."
-}
 
 log_message() {
   local message="$1"
