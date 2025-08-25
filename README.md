@@ -5,7 +5,7 @@ depends on:
 xmlstarlet
 ???
 
-To use, create a config script named rsync_<yourdevice>_config.sh and populate it with a target path and additional information as needed.  At a minumum you will want to change target_dir to your target folder location. e.g. SD Card path
+To use, create a config script named rsync_YOURDEVICE_config.sh and populate it with a target path and additional information as needed.  At a minumum you will want to change target_dir to your target folder location. e.g. SD Card path
 
 Then modify common_config.sh to reflect your source folder and any changes you want to make to rsync options globally.  At a minimum, you need to set GLOBAL_SOURCE_BASE to point to your source folder. e.g. your curated ROMs folder.
 
