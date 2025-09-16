@@ -1,10 +1,10 @@
 # where your files will go
-target_dir="/your/target/path/here"
+target_dir="/your/target/path/here/roms"
 
 onionOS="true"
 
 # User-defined BIOS destination
-bios_target="/media/mbb/RGCUBEXX/bios"
+bios_target="/your/target/path/here/bios"
 
 # Add or adjust any system-specific excludes or renames as needed
 # If it is commented out, it will be synced
