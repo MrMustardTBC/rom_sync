@@ -3,6 +3,9 @@ target_dir="/your/target/path/here"
 
 onionOS="false"
 
+# User-defined BIOS destination
+bios_target="/your/target/path/here/bios"
+
 # directories you do not want to copy
 exclude_dirs=("savestates" "switch" "wii" )
 

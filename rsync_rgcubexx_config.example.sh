@@ -5,6 +5,9 @@ target_dir="/your/target/path/here"
 
 onionOS="false"
 
+# User-defined BIOS destination
+bios_target="/your/target/path/here/bios"
+
 # Add or adjust any system-specific excludes or renames as needed
 # If it is commented out, it will be synced
 exclude_dirs=(
@@ -13,7 +16,7 @@ exclude_dirs=(
   "titlescreens"
   # "videos"
   # "box2dfront"
-  "bios"
+  #"bios"
 
   # Arcade and emulation
   # "mame2003plus"

@@ -1,7 +1,10 @@
 # where your files will go
-target_dir="/your/target/path/here"
+target_dir="/your/target/path/here/roms"
 
 onionOS="false"
+
+# User-defined BIOS destination
+bios_target="/your/target/path/here/bios"
 
 # directories you do not want to copy
 exclude_dirs=("screenshots" "titlescreens" "gc" )
