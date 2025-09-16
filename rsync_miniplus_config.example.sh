@@ -3,6 +3,9 @@ target_dir="/your/target/path/here"
 
 onionOS="true"
 
+# User-defined BIOS destination
+bios_target="/media/mbb/RGCUBEXX/bios"
+
 # Add or adjust any system-specific excludes or renames as needed
 # If it is commented out, it will be synced
 exclude_dirs=(

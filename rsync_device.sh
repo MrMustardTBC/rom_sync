@@ -16,11 +16,12 @@ show_help() {
   echo "If no SYSTEM_NAMEs are provided, performs a full sync of all non-excluded systems."
   echo ""
   echo "Options:"
-  echo "  -h, --help           Show this help message and exit."
-  echo "  -s, --silent         Run in silent mode (no console output, only logs)."
-  echo "  -n, --dry-run        Perform a dry run (simulate rsync, still merges gamelist.xml fields into source)."
-  echo "  --skip-gamelist-sync Skip gamelist.xml metadata synchronization (favorites, preserved fields)."
-  echo "  --purge              Enable purge mode: rsync will delete extraneous files from target that are not in source."
+  echo "  -h, --help                 Show this help message and exit."
+  echo "  -s, --silent               Run in silent mode (no console output, only logs)."
+  echo "  -n, --dry-run              Perform a dry run (simulate rsync, still merges gamelist.xml fields into source)."
+  echo "  --skip-gamelist-sync       Skip gamelist.xml metadata synchronization (favorites, preserved fields)."
+  echo "  --purge                    Enable purge mode: rsync will delete extraneous files from target that are not in source."
+  echo "  --bios                     Enable BIOS copying from source to target."
   echo ""
   echo "Configuration is loaded from:"
   echo "  - common_config.sh (global settings)"
@@ -109,7 +110,6 @@ check_free_space() {
 }
 
 merge_preserved_fields() {
-  # ...existing code from device scripts...
   local system_name="$1"
   local source_rom_dir="${GLOBAL_SOURCE_BASE}/${system_name}"
   local target_rom_dir="${target_dir}/${system_name}"
@@ -373,6 +373,21 @@ process_gamelist_for_system() {
 export -f log_message check_dir_exists check_free_space merge_preserved_fields merge_favorites process_gamelist_for_system
 export GLOBAL_SOURCE_BASE target_dir log_file silent_mode fields_to_preserve exclude_dirs rename_folders reverse_rename_folders
 
+copy_bios() {
+  local system_name="$1"
+  local bios_dest="$2"
+  local source_bios_dir="${GLOBAL_SOURCE_BASE}/${system_name}/bios"
+
+  if [ -d "$source_bios_dir" ]; then
+    log_message "Copying BIOS files for $system_name to $bios_dest"
+    mkdir -p "$bios_dest"
+    rsync -avhr --progress --remove-source-files "$source_bios_dir/" "$bios_dest"
+    find "$source_bios_dir/" -depth -type d -empty -delete
+  else
+    log_message "No BIOS directory found for $system_name at $source_bios_dir. Skipping."
+  fi
+}
+
 main() {
   # Device-specific pre-sync hooks
   if [[ "$device" == "steamdeck" ]]; then
@@ -406,7 +421,10 @@ main() {
     done
     sync
   fi
-  declare -a targeted_systems=()
+    declare -a targeted_systems=()
+  local dry_run_mode=false
+  local copy_bios_enabled=false # <-- Initialize the new variable
+
   for arg in "$@"; do
     case "$arg" in
       -h|--help)
@@ -425,6 +443,10 @@ main() {
         ;;
       --purge)
         purge_target=true
+        ;;
+      --bios) # <-- Add this new case
+        copy_bios_enabled=true
+        log_message "BIOS copying enabled via command line flag."
         ;;
       *)
         targeted_systems+=("$arg")
@@ -521,6 +543,12 @@ main() {
     fi
   done
   log_message "Running rsync: ${rsync_args[*]}"
+  # Add bios exclusion
+  if [ "$copy_bios_enabled" = false ]; then
+    log_message "Excluding 'bios' directories from the main rsync."
+    rsync_args+=("--exclude=bios/")
+  fi
+
   rsync "${rsync_args[@]}" 2>> "$log_file" || {
     rsync_exit_status=$?
     rsync_err=$(tail -n 5 "$log_file")
@@ -529,6 +557,16 @@ main() {
     exit "$rsync_exit_status"
   }
   rename_target_directories
+
+  # Loop through targeted systems and copy bios
+  if "$copy_bios_enabled"; then # <-- Add this conditional
+    log_message "Copying BIOS for targeted systems..."
+    for system in "${targeted_systems[@]}"; do
+      copy_bios "$system" "$bios_target"
+    done
+  else
+    log_message "Skipping BIOS copy. Use --bios flag to enable."
+  fi
 
   # Device-specific post-sync hooks
   if [[ "$device" == "steamdeck" ]]; then
