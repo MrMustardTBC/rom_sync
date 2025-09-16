@@ -1,12 +1,12 @@
 # Example config for BRICK
 # Copy to rsync_brick_config.sh and edit as needed
 
-target_dir="/your/target/path/here"
+target_dir="/your/target/path/here/roms"
 
 onionOS="false"
 
 # User-defined BIOS destination
-bios_target="/media/mbb/SHARE/bios"
+bios_target="/your/target/path/here/bios"
 
 # Add or adjust any system-specific excludes or renames as needed
 # If it's commented out, it will be synced
