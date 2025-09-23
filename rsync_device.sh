@@ -381,7 +381,7 @@ copy_bios() {
   if [ -d "$source_bios_dir" ]; then
     log_message "Copying BIOS files for $system_name to $bios_dest"
     mkdir -p "$bios_dest"
-    rsync -avhr --progress --remove-source-files "$source_bios_dir/" "$bios_dest"
+    rsync -avhr --progress "$source_bios_dir/" "$bios_dest"
     find "$source_bios_dir/" -depth -type d -empty -delete
   else
     log_message "No BIOS directory found for $system_name at $source_bios_dir. Skipping."
