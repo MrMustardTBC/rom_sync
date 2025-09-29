@@ -8,16 +8,18 @@ onionOS="false"
 # User-defined BIOS destination
 bios_target="/your/target/path/here/bios"
 
-# Add or adjust any system-specific excludes or renames as needed
-# If it is commented out, it will be synced
-exclude_dirs=(
+# Folders to exclude from syncing entirely (media and assets)
+EXCLUDE_SUBDIRS=(
   # Media and assets
   "screenshots"
   "titlescreens"
-  # "videos"
-  # "box2dfront"
-  #"bios"
+  #"videos"
+  #"box2dfront"
+  #"Imgs"
+)
 
+# Add or adjust any system-specific excludes or renames as needed
+EXCLUDE_DIRS=(
   # Arcade and emulation
   # "mame2003plus"
   # "mame2010"
