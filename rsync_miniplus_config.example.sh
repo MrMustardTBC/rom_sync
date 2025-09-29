@@ -12,7 +12,7 @@ exclude_dirs=(
   # Media and assets
   "screenshots"
   "titlescreens"
-  #"videos"
+  "videos"
   #"box2dfront"
   "bios"
 

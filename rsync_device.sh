@@ -549,13 +549,15 @@ main() {
     rsync_args+=("--exclude=bios/")
   fi
 
+  local rsync_exit_status=0
+
   rsync "${rsync_args[@]}" 2>> "$log_file" || {
     rsync_exit_status=$?
     rsync_err=$(tail -n 5 "$log_file")
     log_message "Error: rsync operation failed with exit code $rsync_exit_status. Details: $rsync_err" >&2
     echo "rsync error: $rsync_err" >&2
-    exit "$rsync_exit_status"
   }
+
   rename_target_directories
 
   # Loop through targeted systems and copy bios
@@ -615,9 +617,19 @@ main() {
       fi
     done
   fi
+
+  # Final status check and exit with the rsync status
+  if [ "$rsync_exit_status" -ne 0 ]; then
+    log_message "Script finished with rsync error (exit code $rsync_exit_status)."
+  else
+    log_message "Executing final sync command to flush write buffers."
+    sync
+  fi
+
   log_message "$device sync and modifications complete."
-  log_message "Executing final sync command to flush write buffers."
-  sync
+
+  # Exit with the status of the rsync operation to indicate overall success/failure
+  exit "$rsync_exit_status"
 }
 
 main "$@"
