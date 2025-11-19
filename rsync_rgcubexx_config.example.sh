@@ -51,7 +51,7 @@ EXCLUDE_DIRS=(
   # "snes"
   # "n64"
   # "n64dd"
-  "gc"
+  "gamecube"
   "wii"
   "wiiu"
   "switch"

@@ -48,10 +48,13 @@ EXCLUDE_DIRS=(
   #"fds"
   #"snes"
   "n64"
-  "gc"
+  "gamecube"
   "wii"
   "wiiu"
   "switch"
+  #"satellaview"
+  #"virtualboy"
+  #"sufami"
 
   #"gameandwatch"
   #"pokemini"
@@ -60,7 +63,6 @@ EXCLUDE_DIRS=(
   #"gba"
   #"ds"
   "3ds"
-  #"sufami"
 
   # PlayStation systems
   #"psx"
@@ -141,7 +143,8 @@ EXCLUDE_DIRS=(
   "openbor" ##
   "vpinball" #
   "zmachine"
-
+  "thextech"
+  
   # Home computers
   "pdp1" #
   "apple2"
@@ -179,6 +182,7 @@ EXCLUDE_DIRS=(
   "archimedes"
   "xegs" # Atari XE Game System 
   #"amiga500"
+  "amiga1200"
   "x68000" ##
   "fmtowns"
   "samcoupe"
@@ -210,6 +214,14 @@ declare -A rename_folders=(
   ["channelf"]="FAIRCHILD"
   ["tic80"]="TIC"
   ["pico8"]="PICO"
-  ["ngpc"]="NGP"
-
+  ["ngpc"]="NGP"  
+  ["msx2"]="MSX"
+  ["supergrafx"]="SGFX"
+  ["zxspectrum"]="ZXS"
+  ["mame2003plus"]="ARCADE"
+  ["o2em"]="ODYSSEY"
+  ["virtualboy"]="VB"
+  ["3do"]="PANASONIC"
+  ["c20"]="VIC20"
+  ["sega32x"]="THIRTYTWOX"
 )
