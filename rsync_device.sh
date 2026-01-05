@@ -108,19 +108,20 @@ error_exit() {
 # --- Configuration Loading and Initialization ---
 
 # Initialize ALL optional configuration variables and arrays to prevent 'set -u' failure 
-# if they are not defined in the sourced files.
 declare -a EXCLUDE_SUBDIRS=()
-declare -a EXCLUDE_DIRS=() # Renamed to EXCLUDE_DIRS
+declare -a EXCLUDE_DIRS=() 
 declare -A rename_folders=()
 declare -a media_folders=()
+declare -A media_folder_mapping=() # Associative array for media folder mapping
+declare -a GLOBAL_RSYNC_EXCLUDE_FILES=() # Array for global file exclusions
 bios_target=""
 media_target_base=""
+gamelist_target_base="" 
 miximages_name=""
 onionOS="false"
-min_free_space_gb=0 # Set to 0 initially to avoid errors if not set in config
+min_free_space_gb=0 
 
-# Temporarily disable 'set -u' to prevent crashes during sourcing due to unset variables
-# within config files (e.g., in commented-out lines like # echo $optional_var)
+# Temporarily disable 'set -u'
 set +u
 
 # Load global configuration
@@ -129,7 +130,7 @@ if [ -f "$config_common_file" ]; then
   log_message "Loading common configuration from $config_common_file"
   source "$config_common_file" || error_exit "Failed to source $config_common_file. Check config syntax."
 else
-  set -u # Re-enable set -u before erroring out
+  set -u 
   error_exit "Common configuration file not found: $config_common_file"
 fi
 
@@ -139,21 +140,20 @@ if [ -f "$config_device_file" ]; then
   log_message "Loading device configuration from $config_device_file"
   source "$config_device_file" || error_exit "Failed to source $config_device_file for device '$device'. Check config syntax."
 else
-  set -u # Re-enable set -u before erroring out
+  set -u 
   error_exit "Device configuration file not found: $config_device_file"
 fi
 
 # Re-enable 'set -u' for the rest of the script
 set -u
 
-# Check for required variables from config (these MUST be defined in one of the config files)
+# Check for required variables from config
 : "${target_dir:?Error: target_dir is not set in config}"
 : "${GLOBAL_SOURCE_BASE:?Error: GLOBAL_SOURCE_BASE is not set in config}"
 : "${GLOBAL_RSYNC_OPTIONS:?Error: GLOBAL_RSYNC_OPTIONS is not set in config}"
 : "${min_free_space_gb:?Error: min_free_space_gb is not set in config (must be explicitly set to 0 or higher)}"
 
 # --- Helper Functions ---
-
 check_dir_exists() {
   local dir_path="$1"
   if [ ! -d "$dir_path" ]; then
@@ -165,7 +165,6 @@ check_free_space() {
   local target="$1"
   local required_gb="$2"
   local free_space_gb
-  # Get free space in 1GB blocks, suppress error if target not found (handled by check_dir_exists)
   free_space_gb=$(df -BG "$target" 2>/dev/null | awk 'NR==2 {print $4}' | tr -d 'G')
 
   if [ -z "$free_space_gb" ] || [ "$free_space_gb" -lt "$required_gb" ]; then
@@ -175,11 +174,17 @@ check_free_space() {
 }
 
 # --- UNIFIED AND OPTIMIZED GAMELIST PROCESSING ---
-
 process_gamelist_for_system() {
   local system_name="$1"
   local source_file="${GLOBAL_SOURCE_BASE}/${system_name}/gamelist.xml"
-  local target_file="${target_dir}/${system_name}/gamelist.xml"
+  local target_file=""
+
+  if [ -n "${gamelist_target_base:-}" ]; then
+    target_file="${gamelist_target_base}/${system_name}/gamelist.xml"
+  else
+    target_file="${target_dir}/${system_name}/gamelist.xml"
+  fi
+  
   local tmp_file="${source_file}.tmp"
 
   if [ ! -f "$source_file" ]; then
@@ -240,7 +245,6 @@ process_gamelist_for_system() {
   if [ -n "$xmlstarlet_commands" ]; then
     log_message "  - Executing $update_count XMLStarlet operations in one pass."
     
-    # Use eval to execute the long command string with XMLStarlet
     eval "xmlstarlet ed -L $xmlstarlet_commands \"$tmp_file\"" 2>> "$log_file" || {
       log_message "  - CRITICAL ERROR: XMLStarlet command failed. Aborting gamelist sync for $system_name." >&2
       rm -f "$tmp_file"
@@ -270,9 +274,16 @@ process_system() {
   local source_system_dir="${GLOBAL_SOURCE_BASE}/${system_name}"
   local rsync_exit_status=0
 
+  # Determine final system name for post-sync steps and pre-sync media lookup
+  local final_system_name="$system_name"
+  if [ -n "${rename_folders[$system_name]:-}" ]; then
+    final_system_name="${rename_folders[$system_name]}"
+  fi
+
+
   # 1. PRE-RSYNC PREPARATION (Renames/Reversals)
-  # NOTE: Steam Deck media handling removed as it was device-specific and confusing sync flow.
   
+  # 1a. Reverse Folder Rename on Target
   if [ -n "${rename_folders[$system_name]:-}" ]; then
     local new_name="${rename_folders[$system_name]}"
     local target_new_dir="${target_dir}/${new_name}"
@@ -284,6 +295,41 @@ process_system() {
     fi
   fi
   
+  # 1b. MEDIA FOLDER REVERSAL (Move centralized media back to ROM folder for rsync comparison)
+  if [ -n "${media_target_base:-}" ] && [ ${#media_folder_mapping[@]} -gt 0 ]; then
+    # FIX (v27): Use final_system_name to find the centralized media, as it was stored under the renamed folder.
+    local media_source_dir="${media_target_base}/${final_system_name}" 
+    local media_dest_rom_dir="${target_system_dir}" # This is always the pre-rename target (e.g., target_dir/genesis)
+    log_message "  - Reversing centralized media from ${final_system_name} back to ROM folder ${system_name} (Pre-rsync)..."
+    
+    if [ ! -d "$media_source_dir" ]; then
+      log_message "    - Warning: Centralized media source directory not found: $media_source_dir. Skipping reversal."
+    else
+      # Sort keys by length ascending (Parent before Child) for reversal
+      local sorted_source_keys
+      readarray -t sorted_source_keys < <(
+        for k in "${!media_folder_mapping[@]}"; do
+          printf "%s\t%s\n" "${#k}" "$k"
+        done | sort -n | cut -f2
+      )
+      
+      # Iterate over the sorted keys (e.g., 'images' then 'images/videos')
+      for source_folder in "${sorted_source_keys[@]}"; do
+        local target_folder="${media_folder_mapping[$source_folder]}"
+
+        local source_path="${media_source_dir}/${target_folder}" # Source is the ES-DE folder (e.g., downloaded_media/megadrive/covers)
+        local dest_path="${media_dest_rom_dir}/${source_folder}"  # Destination is the ROM folder (e.g., roms/genesis/images/box2dfront)
+
+        if [ -d "$source_path" ]; then
+          log_message "    - Moving target media '$source_path' back to '$dest_path' for rsync update."
+          # Ensure the parent directory (e.g., roms/<system>/images) exists before moving the subfolder (videos)
+          mkdir -p "$(dirname "$dest_path")" 2>> "$log_file" || true
+          mv "$source_path" "$dest_path" 2>> "$log_file" || log_message "    - Warning: Failed to move '$source_path'."
+        fi
+      done
+    fi
+  fi
+
   # 2. GAMELIST SYNC
   if ! "$skip_gamelist"; then
     log_message "  - Synchronizing gamelist.xml metadata into source for $system_name (Pre-rsync)."
@@ -308,6 +354,20 @@ process_system() {
     log_message "  - Purge mode enabled for this system."
   fi
   
+  # Exclude system gamelist.xml files if we are moving them to a centralized location later
+  if [ -n "${gamelist_target_base:-}" ]; then
+    rsync_args+=("--exclude=gamelist.xml")
+    log_message "  - Excluding 'gamelist.xml' from ROM folder sync (will copy to centralized location post-rsync)."
+  fi
+  
+  # GLOBAL EXCLUSIONS FROM common_config.sh
+  if [ ${#GLOBAL_RSYNC_EXCLUDE_FILES[@]} -gt 0 ]; then
+    log_message "  - Applying GLOBAL_RSYNC_EXCLUDE_FILES: ${GLOBAL_RSYNC_EXCLUDE_FILES[*]}"
+    for excluded_file in "${GLOBAL_RSYNC_EXCLUDE_FILES[@]}"; do
+      rsync_args+=("--exclude=${excluded_file}")
+    done
+  fi
+
   if [ "$copy_bios" = false ]; then
     rsync_args+=("--exclude=bios/")
     log_message "  - Excluding 'bios' directory from this system sync (Use --bios to include)."
@@ -329,9 +389,7 @@ process_system() {
   local rsync_source_path="${GLOBAL_SOURCE_BASE}/${system_name}/"
   local rsync_target_path="${target_system_dir}/"
 
-  log_message "  - Running rsync (checksum, inplace) for $system_name..."
-  # Log the full command for debugging (with quotes added for clarity)
-  # log_message "  - Full Rsync Command: rsync ${rsync_args[*]} \"$rsync_source_path\" \"$rsync_target_path\""
+  log_message "  - Running rsync for $system_name..."
 
   local rsync_output
   rsync_output=$(rsync "${rsync_args[@]}" "$rsync_source_path" "$rsync_target_path" 2>&1) || rsync_exit_status=$?
@@ -343,21 +401,18 @@ process_system() {
     return "$rsync_exit_status"
   fi
 
-  # 4. POST-RSYNC CLEANUP
+  # 4. POST-RSYNC CLEANUP (Final Folder/File Moves)
 
   # 4a. BIOS Merge
-  if "$copy_bios" && [ -n "${bios_target}" ]; then
+  if "$copy_bios" && [ -n "${bios_target:-}" ]; then
     local source_bios_dir="${target_system_dir}/bios"
     local dest_bios_dir="${bios_target}"
     
     if [ -d "$source_bios_dir" ] && [ -d "$dest_bios_dir" ]; then
       log_message "  - Merging system-local BIOS from temporary target path '$source_bios_dir' to global target '$dest_bios_dir'."
-      
-      # Use rsync to move files and remove source files after copy
       rsync -a --remove-source-files "$source_bios_dir/" "$dest_bios_dir/" 2>> "$log_file" || {
         log_message "Warning: Failed to merge BIOS contents from system folder." >&2
       }
-      
       if [ -d "$source_bios_dir" ]; then
         log_message "  - Removing empty system-local BIOS directory '$source_bios_dir'."
         rmdir "$source_bios_dir" 2>> "$log_file" || rm -rf "$source_bios_dir" 2>> "$log_file"
@@ -365,7 +420,6 @@ process_system() {
     elif [ -d "$source_bios_dir" ]; then
         log_message "Warning: BIOS merge skipped. Global BIOS target directory not found: $dest_bios_dir (Check \$bios_target in config)."
     else
-      # FIX: Corrected message to show the temporary target path
       log_message "  - BIOS merge skipped. No 'bios/' directory was copied to the temporary target path: $source_bios_dir."
     fi
   fi
@@ -375,6 +429,7 @@ process_system() {
     local new_name="${rename_folders[$system_name]}"
     local target_original_dir="${target_dir}/${system_name}"
     local target_new_dir="${target_dir}/${new_name}"
+    final_system_name="$new_name" 
 
     if [ -d "$target_new_dir" ]; then
       log_message "  - Destination target folder '$target_new_dir' already exists. Merging contents from temporary '$target_original_dir'."
@@ -395,21 +450,65 @@ process_system() {
   
   # 4c. OnionOS Gamelist Rename/Clean
   if [[ "$onionOS" == "true" ]]; then
-    local final_system_name="$system_name"
-    if [ -n "${rename_folders[$system_name]:-}" ]; then
-      final_system_name="${rename_folders[$system_name]}"
-    fi
     local file="${target_dir}/${final_system_name}/gamelist.xml"
+    local new_file="$(dirname "$file")/miyoogamelist.xml"    
     
     if [ -f "$file" ]; then
-      local new_file="$(dirname "$file")/miyoogamelist.xml"
-      log_message "  - OnionOS: Renaming '$file' to '$new_file'"
-      mv "$file" "$new_file" || log_message "Warning: Failed to rename '$file'."
+      log_message "  - OnionOS: Renaming gamelist.xml to miyoogamelist.xml."
+      mv "$file" "$new_file" 2>> "$log_file" || log_message "Warning: Failed to rename gamelist.xml."
+    fi
+
+    if [ -f "$new_file" ]; then
       log_message "  - OnionOS: Cleaning '$new_file' (removing entries with id=0)..."
       xmlstarlet ed -L -d "//game[@id='0']" "$new_file" 2>> "$log_file" || log_message "Warning: Failed to clean '$new_file'."
     fi
   fi
 
+  # 4d. MEDIA FOLDER MOVE (Move updated/new media from ROM folder to centralized target)
+  if [ -n "${media_target_base:-}" ] && [ ${#media_folder_mapping[@]} -gt 0 ]; then
+    local current_rom_dir="${target_dir}/${final_system_name}"
+    local media_target_dir="${media_target_base}/${final_system_name}"
+    log_message "  - Moving updated media folders to centralized target (Post-rsync) for ${final_system_name}..."
+    mkdir -p "$media_target_dir" 2>> "$log_file" || true # Ensure the media target exists
+    
+    # Sort keys by length descending (Child before Parent) for move
+    local sorted_source_keys
+    readarray -t sorted_source_keys < <(
+      for k in "${!media_folder_mapping[@]}"; do
+        printf "%s\t%s\n" "${#k}" "$k"
+      done | sort -r -n | cut -f2
+    )
+    
+    # Iterate over the sorted keys (e.g., 'images/videos' then 'images')
+    for source_folder in "${sorted_source_keys[@]}"; do
+      local target_folder="${media_folder_mapping[$source_folder]}"
+      
+      local source_path="${current_rom_dir}/${source_folder}" # Source is the ROM folder
+      local dest_path="${media_target_dir}/${target_folder}" # Destination is the ES-DE folder
+
+      if [ -d "$source_path" ]; then
+        log_message "    - Moving media '$source_path' to centralized target '$dest_path'"
+        # Note: If dest_path exists, mv will move source_path INTO dest_path.
+        mv "$source_path" "$dest_path" 2>> "$log_file" || log_message "    - Warning: Failed to move '$source_path' to '$dest_path'."
+      fi
+    done
+  fi
+  
+  # 4e. GAMELIST COPY TO CENTRALIZED TARGET (for ES-DE/similar)
+  if [ -n "${gamelist_target_base:-}" ]; then
+    local source_gamelist="${GLOBAL_SOURCE_BASE}/${system_name}/gamelist.xml"
+    local dest_gamelist_dir="${gamelist_target_base}/${final_system_name}"
+    local dest_gamelist_file="${dest_gamelist_dir}/gamelist.xml"
+
+    if [ -f "$source_gamelist" ]; then
+      log_message "  - Copying finalized gamelist.xml to centralized target: $dest_gamelist_file"
+      mkdir -p "$dest_gamelist_dir" 2>> "$log_file" || true
+      cp "$source_gamelist" "$dest_gamelist_file" 2>> "$log_file" || log_message "Warning: Failed to copy gamelist.xml to centralized target."
+    else
+      log_message "  - Warning: Source gamelist.xml not found at $source_gamelist. Skipping centralized copy."
+    fi
+  fi
+  
   return 0
 }
 
@@ -432,7 +531,6 @@ main() {
     for dir in "${all_source_dirs[@]}"; do
       local is_excluded=false
       
-      # Use the new variable name EXCLUDE_DIRS
       for exclude in "${EXCLUDE_DIRS[@]}"; do
         if [ "$dir" = "$exclude" ]; then
           is_excluded=true
@@ -504,4 +602,4 @@ main() {
   fi
 }
 
-main
+main "$@"

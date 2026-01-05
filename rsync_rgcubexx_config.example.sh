@@ -11,8 +11,8 @@ bios_target="/your/target/path/here/bios"
 # Folders to exclude from syncing entirely (media and assets)
 EXCLUDE_SUBDIRS=(
   # Media and assets
-  "screenshots"
-  "titlescreens"
+  "screenshot"
+  "titleshot"
   #"videos"
   #"box2dfront"
   #"Imgs"
@@ -63,7 +63,7 @@ EXCLUDE_DIRS=(
   # "gbc"
   # "virtualboy"
   # "gba"
-  # "ds"
+  # "nds"
   "3ds"
 
   # PlayStation systems
@@ -103,7 +103,7 @@ EXCLUDE_DIRS=(
   "scv"
   
   # other gen 4 consoles
-  "cdtv" #
+  "amigacdtv" #
   # "pcengine"
   # "pcenginecd"
   # "supergrafx"
@@ -145,6 +145,9 @@ EXCLUDE_DIRS=(
   # "openbor"
   "vpinball" #
   "zmachine"
+  #"thextech"
+  #"zc210"
+  #"ports"
 
   # Home computers
   "pdp1" #
@@ -172,7 +175,7 @@ EXCLUDE_DIRS=(
   "spectravideo"
   "amstradcpc"
   "macintosh" #
-  "thompson" #
+  "thomson" #
   "cplus4"
   "laser310" #
   "oric" # Oric Atmos
@@ -183,6 +186,7 @@ EXCLUDE_DIRS=(
   "archimedes"
   "xegs" # Atari XE Game System
   "amiga500"
+  "amiga1200"
   "x68000"
   "fmtowns"
   "samcoupe"

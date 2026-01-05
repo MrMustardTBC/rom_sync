@@ -12,8 +12,8 @@ bios_target="/your/target/path/here/bios"
 # If it's commented out, it will be synced
 exclude_dirs=(
   # Media and assets
-  "screenshots"
-  "titlescreens"
+  "screenshot"
+  "titleshot"
   #"videos"
   #"box2dfront"
   "bios"
@@ -60,7 +60,7 @@ exclude_dirs=(
   #"gbc"
   #"virtualboy"
   #"gba"
-  "ds"
+  "nds"
   "3ds"
   #"sufami"
 
@@ -101,7 +101,7 @@ exclude_dirs=(
 #   "scv"
   
   # other gen 4 consoles
-  "cdtv"
+  "amigacdtv"
 #   "pcengine"
   "pcenginecd"
   #"supergrafx"
@@ -142,6 +142,9 @@ exclude_dirs=(
   #"openbor"
   "vpinball" #
   #"zmachine"
+  "thextech"
+  "zc210"
+  "ports"
 
   # Home computers
 #   "pdp1" #
@@ -169,7 +172,7 @@ exclude_dirs=(
   # "spectravideo"
   # "amstradcpc"
   # "macintosh" #
-  # "thompson" #
+  # "thomson" #
   # "cplus4"
   # "laser310" #
   # "oric" # Oric Atmos
