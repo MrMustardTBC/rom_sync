@@ -10,13 +10,18 @@ bios_target="/your/target/path/here/bios"
 
 # Add or adjust any system-specific excludes or renames as needed
 # If it's commented out, it will be synced
-exclude_dirs=(
-  # Media and assets
+
+# Folders to exclude from syncing entirely (media and assets)
+EXCLUDE_SUBDIRS=(
   "screenshot"
   "titleshot"
   #"videos"
   #"box2dfront"
   "bios"
+)
+
+EXCLUDE_DIRS=(
+  # Media and assets
 
   # Arcade and emulation
   #"mame2003plus"

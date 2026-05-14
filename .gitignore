@@ -7,3 +7,11 @@ common_config.sh
 
 # editor backup files
 *~
+
+# utility and audit scripts
+merge_fbneo_cps.sh
+audit_*.py
+*audit*.sh
+cleanup_*.py
+swap_*.py
+update_*.py

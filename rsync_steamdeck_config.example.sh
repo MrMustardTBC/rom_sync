@@ -7,7 +7,7 @@ onionOS="false"
 bios_target="/your/target/path/here/bios"
 
 # directories you do not want to copy
-exclude_dirs=("savestates" "switch" "wii" )
+EXCLUDE_DIRS=("savestates" "switch" "wii" )
 
 # media files are handled differently in ES on steam deck, so this sets up some folder moving and renaming 
 tools_dir="/your/target/path/Emulation/tools"

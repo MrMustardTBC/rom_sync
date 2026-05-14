@@ -7,7 +7,7 @@ onionOS="false"
 bios_target="/your/target/path/here/bios"
 
 # directories you do not want to copy
-exclude_dirs=("screenshot" "titleshot" "gamecube" )
+EXCLUDE_DIRS=("screenshot" "titleshot" "gamecube" )
 
 # Add your specific renames here. Example: ["snes"]="SFC"
 declare -A rename_folders=(
